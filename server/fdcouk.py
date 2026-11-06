@@ -149,10 +149,16 @@ def load(log):
                 o = _odd(r.get(col))
                 if o:
                     prices[book] = o
+            wins = {}
+            for side, col_h in (('home', 'H'), ('away', 'A')):
+                for prefix, book in (('B365', 'Bet365'), ('PS', 'Pinnacle'), ('Avg', 'Market average')):
+                    o = _odd(r.get(prefix + col_h))
+                    if o:
+                        wins.setdefault(side, {})[book] = o
             upcoming.append({
                 'country': MAIN[code][0], 'div': code, 'ts': int(when.timestamp()),
                 'home': (r.get('HomeTeam') or '').strip(), 'away': (r.get('AwayTeam') or '').strip(),
-                'o25': prices,
+                'o25': prices, 'win': wins,
             })
     log(f'football-data.co.uk: {files} files, {len(matches)} results, {len(upcoming)} upcoming with odds')
     return matches, upcoming

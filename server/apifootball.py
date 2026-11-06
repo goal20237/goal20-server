@@ -205,6 +205,8 @@ def parse_odds(row):
                     m = {'over 1.5': 'over15', 'over 2.5': 'over25'}.get(label)
                 elif bet_name == 'both teams score' and label == 'yes':
                     m = 'btts'
+                elif bet_name == 'match winner':
+                    m = {'home': 'home', 'away': 'away'}.get(label)
                 if m:
                     out.append({'b': name, 'm': m, 'o': odd})
     return out

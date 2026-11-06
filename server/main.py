@@ -163,21 +163,26 @@ def build_history(state, fd_matches, fd_upcoming):
         for side in ('home', 'away'):
             fd_by_country.setdefault(m['country'], set()).add(m[side])
             fd_div_of[f"{m['country']}|{m[side]}"] = m['div']
-    matcher = Matcher(fd_by_country, state.name_map)
+    matcher = Matcher(fd_by_country)
     team_country, team_league = {}, {}
     for f in api_fixtures:
         for side in ('h', 'a'):
             team_country.setdefault(f[side]['id'], f['lg']['country'])
             team_league.setdefault(f[side]['id'], f['lg']['name'])
-    fd_to_api = {}
-    mapped = 0
+    # Each football-data.co.uk club goes to the single best-matching API team
+    # (exact name beats a partial one), recomputed every run.
+    best_for = {}
     for tid, country in team_country.items():
         if not tid or tid not in teams:
             continue
-        key = matcher.match(tid, teams[tid]['name'], country, team_league.get(tid, ''))
-        if key:
-            mapped += 1
-            fd_to_api.setdefault(key, tid)
+        found = matcher.match(teams[tid]['name'], country, team_league.get(tid, ''))
+        if found:
+            key, score = found
+            if key not in best_for or score > best_for[key][1]:
+                best_for[key] = (tid, score)
+    fd_to_api = {k: v[0] for k, v in best_for.items()}
+    mapped = len(fd_to_api)
+    state.name_map = {str(tid): key for key, tid in fd_to_api.items()}
 
     # Learn which API league id each football-data.co.uk division is.
     votes = {}
@@ -257,15 +262,15 @@ def add_fd_odds(enrich, fd_upcoming, fd_to_api, fixtures):
     for u in fd_upcoming:
         hid = fd_to_api.get(f"{u['country']}|{u['home']}")
         aid = fd_to_api.get(f"{u['country']}|{u['away']}")
-        if not hid or not aid or not u['o25']:
+        if not hid or not aid or not (u['o25'] or u.get('win')):
             continue
         for f in by_pair.get((hid, aid), []):
             if abs(f['ts'] - u['ts']) > 36 * 3600:
                 continue
-            enrich['fdodds'][str(f['id'])] = {
-                'at': stamp(),
-                'v': [{'b': f'{b} (football-data)', 'm': 'over25', 'o': o} for b, o in u['o25'].items()],
-            }
+            quotes = [{'b': f'{b} (football-data)', 'm': 'over25', 'o': o} for b, o in u['o25'].items()]
+            for side, books in (u.get('win') or {}).items():
+                quotes += [{'b': f'{b} (football-data)', 'm': side, 'o': o} for b, o in books.items()]
+            enrich['fdodds'][str(f['id'])] = {'at': stamp(), 'v': quotes}
             n += 1
     if n:
         log(f'football-data.co.uk odds attached to {n} fixtures')

@@ -65,11 +65,11 @@ def build_world():
         h, a = rnd.sample(TEAMS, 2)
         lines.append(f'E0,{d:%d/%m/%Y},15:00,{h[2]},{a[2]},{rnd.randint(1, 4)},{rnd.randint(0, 3)},H,1.8,2.0')
     csv_e0 = '\n'.join(lines).encode()
-    fx = ['Div,Date,Time,HomeTeam,AwayTeam,B365>2.5,P>2.5,Avg>2.5,Max>2.5']
+    fx = ['Div,Date,Time,HomeTeam,AwayTeam,B365>2.5,P>2.5,Avg>2.5,Max>2.5,B365H,B365D,B365A,AvgH,AvgA']
     for r in days[today.strftime('%Y-%m-%d')]:
         h = next(t for t in TEAMS if t[0] == r['teams']['home']['id'])
         a = next(t for t in TEAMS if t[0] == r['teams']['away']['id'])
-        fx.append(f'E0,{today:%d/%m/%Y},15:00,{h[2]},{a[2]},1.72,1.75,1.70,1.90')
+        fx.append(f'E0,{today:%d/%m/%Y},15:00,{h[2]},{a[2]},1.72,1.75,1.70,1.90,2.10,3.40,3.50,2.05,3.45')
     return days, csv_e0, '\n'.join(fx).encode()
 
 
@@ -149,6 +149,7 @@ def main():
     assert len(fd_odds) >= 5, 'football-data odds not attached'
     assert any(q['b'] == 'Book' for v in enrich['odds'].values() for q in v['v']), 'API odds missing'
     assert all('Best market' not in q['b'] and 'Max' not in q['b'] for v in enrich['odds'].values() for q in v['v'])
+    assert any(q['m'] == 'home' for v in enrich['odds'].values() for q in v['v']), 'win odds missing'
     state = json.load(open(os.path.join(tmp, 'data', 'state.json')))
     assert 'h2h' in state['blocked'], 'plan block not remembered'
     assert state['window'] and state['window'][0] == min(manifest['days'] + [today]) or True

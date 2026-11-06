@@ -29,7 +29,10 @@ DROP = {'fc', 'cf', 'afc', 'sc', 'ac', 'as', 'ss', 'sv', 'fk', 'bk', 'if', 'cd',
         'sd', 'club', 'de', 'the', 'calcio', 'cp', 'sk', 'ik', 'ff', 'aif', 'bc', 'ca',
         'ec', 'se', 'cr', 'rc', 'us', 'sad', 'vfb', 'vfl', 'tsg', '1', 'fsv', 'spvgg'}
 
-YOUTH = re.compile(r'(\bU\d{2}\b|\bW\b|women|femen|reserves?\b|\bII\b|\bB\b$)', re.I)
+# Reserve, youth and women's sides must never take a first team's results.
+YOUTH = re.compile(
+    r'(\bU\d{2}\b|\bW\b|women|femen|fem\.?$|ladies|reserves?\b|\bII\b|\bIII\b|'
+    r'\bB\b$|\bC\b$|\bjong\b|castilla|youth|academy|primavera|juniors?\b)', re.I)
 
 
 def norm(name):
@@ -60,24 +63,22 @@ def is_youth(name, league=''):
 class Matcher:
     """Per-country candidate lists of football-data.co.uk team names."""
 
-    def __init__(self, fd_teams_by_country, saved):
+    def __init__(self, fd_teams_by_country):
         self.by_country = {c: {n: norm(n) for n in names} for c, names in fd_teams_by_country.items()}
-        self.saved = saved  # {api_id(str): 'country|fdname'}; misses are retried every run
 
-    def match(self, api_id, api_name, country, league=''):
-        key = str(api_id)
-        if self.saved.get(key):
-            return self.saved[key]
+    def match(self, api_name, country, league=''):
+        """Returns (fd_key, score) or None. fd_key is 'country|fd name'."""
         if is_youth(api_name, league):
             return None
         cands = self.by_country.get(country)
         if not cands:
-            return None  # country not covered: do not remember a miss
+            return None
         target = norm(api_name)
         scored = sorted(((similarity(target, n), raw) for raw, n in cands.items()), reverse=True)
-        best = scored[0] if scored else (0, None)
+        if not scored:
+            return None
+        best = scored[0]
         second = scored[1][0] if len(scored) > 1 else 0
         if best[0] >= 0.84 and best[0] - second >= 0.04:
-            self.saved[key] = f'{country}|{best[1]}'
-            return self.saved[key]
+            return f'{country}|{best[1]}', best[0]
         return None

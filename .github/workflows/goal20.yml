@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: '7 5 * * *'       # full run, 06:07 Cameroon time
     - cron: '41 7-22 * * *'   # hourly refresh (scores, statuses), 08:41-23:41 Cameroon
+  push:
+    branches: [main]
+    paths: ['server/**', '.github/workflows/**']
   workflow_dispatch:
     inputs:
       mode:
@@ -31,7 +34,7 @@ jobs:
     env:
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
       PLAN: ${{ vars.PLAN || 'free' }}
-      MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.schedule == '7 5 * * *' && 'full' || 'quick') }}
+      MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || ((github.event_name == 'push' || github.event.schedule == '7 5 * * *') && 'full' || 'quick') }}
     steps:
       - uses: actions/checkout@v5
 
