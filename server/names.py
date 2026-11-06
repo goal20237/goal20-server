@@ -82,3 +82,22 @@ class Matcher:
         if best[0] >= 0.84 and best[0] - second >= 0.04:
             return f'{country}|{best[1]}', best[0]
         return None
+
+    def match_any(self, api_name, league=''):
+        """For teams only seen in international club cups (country 'World'):
+        searches every country, with a stricter bar. Returns (fd_key, score)."""
+        if is_youth(api_name, league):
+            return None
+        target = norm(api_name)
+        scored = []
+        for country, cands in self.by_country.items():
+            for raw, n in cands.items():
+                scored.append((similarity(target, n), f'{country}|{raw}'))
+        if not scored:
+            return None
+        scored.sort(reverse=True)
+        best = scored[0]
+        second = scored[1][0] if len(scored) > 1 else 0
+        if best[0] >= 0.92 and best[0] - second >= 0.06:
+            return best[1], best[0]
+        return None

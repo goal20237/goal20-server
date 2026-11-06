@@ -164,18 +164,27 @@ def build_history(state, fd_matches, fd_upcoming):
             fd_by_country.setdefault(m['country'], set()).add(m[side])
             fd_div_of[f"{m['country']}|{m[side]}"] = m['div']
     matcher = Matcher(fd_by_country)
-    team_country, team_league = {}, {}
+    # A team can appear in its domestic league and in a European cup
+    # (country "World"): try every country it was seen in, domestic first.
+    team_countries, team_league = {}, {}
     for f in api_fixtures:
         for side in ('h', 'a'):
-            team_country.setdefault(f[side]['id'], f['lg']['country'])
+            team_countries.setdefault(f[side]['id'], set()).add(f['lg']['country'])
             team_league.setdefault(f[side]['id'], f['lg']['name'])
     # Each football-data.co.uk club goes to the single best-matching API team
     # (exact name beats a partial one), recomputed every run.
     best_for = {}
-    for tid, country in team_country.items():
+    for tid, countries in team_countries.items():
         if not tid or tid not in teams:
             continue
-        found = matcher.match(teams[tid]['name'], country, team_league.get(tid, ''))
+        name = teams[tid]['name']
+        found = None
+        for country in sorted(c for c in countries if c in fd_by_country):
+            hit = matcher.match(name, country, team_league.get(tid, ''))
+            if hit and (found is None or hit[1] > found[1]):
+                found = hit
+        if found is None and countries <= {'World', 'Europe', ''}:
+            found = matcher.match_any(name, team_league.get(tid, ''))
         if found:
             key, score = found
             if key not in best_for or score > best_for[key][1]:
