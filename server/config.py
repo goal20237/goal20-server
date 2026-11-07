@@ -21,7 +21,7 @@ HISTORY_DAYS = 450
 
 CAMEROON = timezone(timedelta(hours=1))
 API_TZ = 'Africa/Douala'
-VERSION = '1.1.3'
+VERSION = '1.2.0'
 
 
 def now_utc():

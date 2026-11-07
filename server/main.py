@@ -225,24 +225,29 @@ def build_history(state, fd_matches, fd_upcoming):
             div_league[div] = best[0]
 
     # Existing API pairs (for de-duplication), keyed by home/away and day.
-    api_pairs = set()
+    api_pairs = {}
     for r in rows.values():
         day = r[1] // 86400
         for dd in (day - 1, day, day + 1):
-            api_pairs.add((r[4], r[5], dd))
+            api_pairs[(r[4], r[5], dd)] = r[0]
 
     added = 0
     for m in fd_matches:
         hk, ak = f"{m['country']}|{m['home']}", f"{m['country']}|{m['away']}"
         hid = fd_to_api.get(hk) or synthetic_id('team|' + hk)
         aid = fd_to_api.get(ak) or synthetic_id('team|' + ak)
-        if (hid, aid, m['ts'] // 86400) in api_pairs:
+        dup = api_pairs.get((hid, aid, m['ts'] // 86400))
+        if dup is not None:
+            # Same match already known from API-Football: keep its row and
+            # add the CSV's shots / corners to it.
+            if m.get('st') and len(rows[dup]) == 8:
+                rows[dup] = rows[dup] + list(m['st'])
             continue
         lid = div_league.get(m['div']) or synthetic_id('league|' + m['div'])
         mid = synthetic_id(f"match|{m['div']}|{m['ts'] // 86400}|{m['home']}|{m['away']}")
         if mid not in rows:
             added += 1
-        rows[mid] = [mid, m['ts'], lid, m['season'], hid, aid, m['hg'], m['ag']]
+        rows[mid] = [mid, m['ts'], lid, m['season'], hid, aid, m['hg'], m['ag']] + (list(m['st']) if m.get('st') else [])
         for tid, name in ((hid, m['home']), (aid, m['away'])):
             if tid < 0:
                 teams.setdefault(tid, {'id': tid, 'name': name, 'logo': ''})

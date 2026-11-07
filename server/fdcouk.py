@@ -108,10 +108,13 @@ def load(log):
                     continue
                 if when < cutoff:
                     continue
+                # Shots, shots on target and corners (home, away), when present.
+                stats = [_num(r.get(c)) for c in ('HS', 'AS', 'HST', 'AST', 'HC', 'AC')]
                 matches.append({
                     'country': country, 'div': code, 'league': league,
                     'season': 2000 + int(season[:2]), 'ts': int(when.timestamp()),
                     'home': home, 'away': away, 'hg': hg, 'ag': ag,
+                    'st': stats if stats[2] is not None and stats[3] is not None else None,
                 })
     for code in EXTRA:
         rows = _rows(f'{BASE}/new/{code}.csv')

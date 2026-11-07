@@ -59,11 +59,11 @@ def build_world():
             fid += 1
         days[key] = rows
     # football-data.co.uk: 120 past matches between the same clubs (FD names).
-    lines = ['Div,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,FTR,B365>2.5,B365<2.5']
+    lines = ['Div,Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,FTR,HS,AS,HST,AST,HC,AC,B365>2.5,B365<2.5']
     for k in range(120):
         d = today - timedelta(days=3 + k // 5)
         h, a = rnd.sample(TEAMS, 2)
-        lines.append(f'E0,{d:%d/%m/%Y},15:00,{h[2]},{a[2]},{rnd.randint(1, 4)},{rnd.randint(0, 3)},H,1.8,2.0')
+        lines.append(f'E0,{d:%d/%m/%Y},15:00,{h[2]},{a[2]},{rnd.randint(1, 4)},{rnd.randint(0, 3)},H,14,9,6,3,7,4,1.8,2.0')
     csv_e0 = '\n'.join(lines).encode()
     fx = ['Div,Date,Time,HomeTeam,AwayTeam,B365>2.5,P>2.5,Avg>2.5,Max>2.5,B365H,B365D,B365A,AvgH,AvgA']
     for r in days[today.strftime('%Y-%m-%d')]:
@@ -142,6 +142,8 @@ def main():
     assert len(positive) >= 100, 'football-data rows were not mapped to API team ids'
     assert all(r[2] == 39 for r in positive), 'division not linked to league 39'
     assert manifest['days'], 'no day files published'
+    with_stats = [r for r in rows if len(r) == 14]
+    assert len(with_stats) >= 100 and with_stats[0][10] == 6, 'shots / corners not carried into history'
     today = manifest['today']
     day = json.load(open(os.path.join(site, 'days', f'{today}.json')))
     assert len(day['f']) == 5 and day['f'][0]['st'] == 'NS'
