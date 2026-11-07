@@ -21,6 +21,9 @@ from .store import (State, all_day_keys, load_day, load_enrich, save_day,
 LOG = []
 
 
+
+DONE_CODES = ('FT', 'AET', 'PEN', 'PST', 'CANC', 'ABD', 'AWD', 'WO')
+
 def log(msg):
     line = f'[{config.now_utc():%H:%M:%S}] {msg}'
     LOG.append(line)
@@ -45,7 +48,7 @@ def synthetic_id(text):
 def day_is_final(key, fixtures):
     end = datetime.strptime(key, '%Y-%m-%d').replace(tzinfo=config.CAMEROON) + timedelta(days=1)
     long_over = config.now_utc() > end + timedelta(hours=12)
-    done = all(f['st'] in ('FT', 'AET', 'PEN', 'PST', 'CANC', 'ABD', 'AWD', 'WO') for f in fixtures)
+    done = all(f['st'] in DONE_CODES for f in fixtures)
     return key < config.day_key(config.today_cm()) and (done or long_over)
 
 
@@ -77,7 +80,15 @@ def collect_days(api, state, full):
         'tomorrow': config.day_key(today + timedelta(days=1)),
         'yesterday': config.day_key(today - timedelta(days=1)),
     }
-    wanted = [keys['today']]
+    # Between midnight and 06:00 the matches still running or just finished
+    # belong to yesterday: refresh yesterday so late results settle overnight.
+    late_night = config.now_utc().astimezone(config.CAMEROON).hour < 6
+    wanted = [] if (late_night and not full) else [keys['today']]
+    yd = load_day(keys['yesterday'])
+    unfinished = yd is not None and not yd.get('final') and any(
+        f['st'] not in DONE_CODES for f in yd.get('f', []))
+    if not full and (late_night or unfinished):
+        wanted.insert(0, keys['yesterday'])
     if full or load_day(keys['tomorrow']) is None:
         wanted.append(keys['tomorrow'])
     if full:
@@ -124,13 +135,19 @@ def live_refresh(api, today_key):
     except ApiError as e:
         log(f'Live scores: {e.message}')
         return
-    d = load_day(today_key) or {'f': []}
-    by_id = {f['id']: f for f in d['f']}
-    for r in rows:
-        f = to_app_fixture(r)
-        if f['id'] in by_id:
-            by_id[f['id']] = f
-    save_day(today_key, sorted(by_id.values(), key=lambda f: f['ts']), False)
+    live = {f['id']: f for f in (to_app_fixture(r) for r in rows)}
+    yesterday_key = config.day_key(config.today_cm() - timedelta(days=1))
+    for key in (today_key, yesterday_key):
+        d = load_day(key)
+        if not d:
+            continue
+        by_id = {f['id']: f for f in d['f']}
+        hit = [i for i in live if i in by_id]
+        if not hit:
+            continue
+        for i in hit:
+            by_id[i] = live[i]
+        save_day(key, sorted(by_id.values(), key=lambda f: f['ts']), False)
     log(f'Live scores: {len(rows)} matches in play')
 
 
@@ -450,7 +467,7 @@ def main():
         # Quick run: reuse the last full history and add today's finished matches.
         history = previous
         known = {r[0] for r in history['m']}
-        for f in (load_day(keys['today']) or {}).get('f', []):
+        for f in [f for k in (keys['today'], keys.get('yesterday', '')) for f in (load_day(k) or {}).get('f', [])]:
             r = hist_row(f)
             if r and r[0] not in known:
                 history['m'].append(r)

@@ -4,6 +4,7 @@ on:
   schedule:
     - cron: '7 5 * * *'       # full run, 06:07 Cameroon time
     - cron: '41 7-22 * * *'   # hourly refresh (scores, statuses), 08:41-23:41 Cameroon
+    - cron: '41 23,0,1 * * *' # late results (yesterday's matches), 00:41-02:41 Cameroon
   push:
     branches: [main]
     paths: ['server/**', '.github/workflows/**']
