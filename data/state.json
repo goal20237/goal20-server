@@ -61,7 +61,7 @@
   "1198": "Brazil|Remo",
   "135": "Brazil|Cruzeiro",
   "118": "Brazil|Bahia",
-  "2307": "Mexico|Club Leon",
+  "2289": "Mexico|Club Leon",
   "28328": "Romania|Petrolul",
   "2589": "Romania|UTA Arad",
   "597": "Russia|Lokomotiv Moscow",
@@ -640,7 +640,6 @@
   "218": "Portugal|Tondela",
   "997": "Turkey|Genclerbirligi",
   "7844": "Brazil|Internacional",
-  "790": "Argentina|Central Cordoba",
   "2149": "Norway|Fredrikstad",
   "600": "Belgium|Waregem",
   "6215": "Belgium|Dender",
@@ -656,13 +655,21 @@
   "133": "Brazil|Vasco",
   "226": "Portugal|Rio Ave",
   "129": "Brazil|Ceara",
-  "446": "Argentina|Lanus"
+  "1065": "Argentina|Central Cordoba",
+  "446": "Argentina|Lanus",
+  "2290": "Mexico|Queretaro",
+  "2291": "Mexico|Puebla",
+  "2278": "Mexico|Guadalajara Chivas",
+  "2581": "Romania|FC Botosani",
+  "6886": "Romania|Otelul",
+  "9593": "Spain|Sabadell",
+  "508": "Italy|Bari"
  },
  "window": [
-  "2026-11-06",
-  "2026-11-08",
-  "2026-11-07"
+  "2026-11-07",
+  "2026-11-09",
+  "2026-11-08"
  ],
- "last_full": "2026-11-07T05:50:49.214023+00:00",
+ "last_full": "2026-11-08T05:55:01.165287+00:00",
  "plan_name": "Free"
 }
