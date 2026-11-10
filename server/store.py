@@ -43,6 +43,16 @@ class State:
         self.window = raw.get('window')  # [from, to, seen_day]
         self.last_full = raw.get('last_full')
         self.plan_name = raw.get('plan_name')
+        self.suspended_until = raw.get('suspended_until') or 0
+        self.suspended_why = raw.get('suspended_why') or ''
+
+    def suspend(self, why, hours=20):
+        self.suspended_until = time.time() + hours * 3600
+        self.suspended_why = why
+
+    @property
+    def is_suspended(self):
+        return self.suspended_until > time.time()
 
     def block(self, cap, why, days=7):
         self.blocked[cap] = time.time() + days * 86400
@@ -56,6 +66,8 @@ class State:
             'blocked': self.blocked, 'blocked_why': self.blocked_why,
             'name_map': self.name_map, 'window': self.window,
             'last_full': self.last_full, 'plan_name': self.plan_name,
+            'suspended_until': self.suspended_until if self.is_suspended else 0,
+            'suspended_why': self.suspended_why if self.is_suspended else '',
         }, compact=False)
 
 

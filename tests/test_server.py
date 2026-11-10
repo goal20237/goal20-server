@@ -80,12 +80,15 @@ def main():
     os.environ.update({'API_FOOTBALL_KEY': 'TESTKEY', 'PLAN': 'free', 'MODE': 'full'})
     days, csv_e0, csv_fix = build_world()
     calls = []
+    suspended = {'on': False}
 
     def fake_fetch(url, headers=None, timeout=40, retries=2):
         calls.append(url)
         hdr = {'x-ratelimit-requests-remaining': '80', 'x-ratelimit-requests-limit': '100'}
         if 'api-sports.io' in url:
             assert headers['x-apisports-key'] == 'TESTKEY'
+            if suspended['on']:
+                return 200, hdr, json.dumps({'errors': {'access': 'Your account is suspended, check on https://dashboard.api-football.com.'}, 'response': []}).encode()
             if '/status' in url:
                 return 200, hdr, json.dumps({'errors': [], 'response': {
                     'subscription': {'plan': 'Free'}, 'requests': {'current': 20, 'limit_day': 100}}}).encode()
@@ -142,6 +145,7 @@ def main():
     assert len(positive) >= 100, 'football-data rows were not mapped to API team ids'
     assert all(r[2] == 39 for r in positive), 'division not linked to league 39'
     assert manifest['days'], 'no day files published'
+    assert manifest['files']['history'] and set(manifest['files']['days']) == set(manifest['days']), 'fingerprints missing'
     with_stats = [r for r in rows if len(r) == 14]
     assert len(with_stats) >= 100 and with_stats[0][10] == 6, 'shots / corners not carried into history'
     today = manifest['today']
@@ -168,6 +172,24 @@ def main():
     assert m2['mode'] == 'quick' and m2['requests_used'] <= 3, m2['requests_used']
     h2 = json.loads(gzip.open(os.path.join(site, 'history.json.gz')).read())
     assert len(h2['m']) >= 120
+    # Account suspended: one check at the full run, none at quick runs, and
+    # the days keep coming from football-data.co.uk without duplicates.
+    suspended['on'] = True
+    server.main.config.MODE = 'full'
+    server.main.LOG.clear()
+    calls.clear()
+    assert server.main.main() == 0
+    m3 = json.load(open(os.path.join(site, 'manifest.json')))
+    assert m3['api_suspended'] is True and 'suspended' in m3['api_note'], m3.get('api_note')
+    assert len([c for c in calls if 'api-sports.io' in c]) == 1, [c for c in calls if 'api-sports.io' in c]
+    d3 = json.load(open(os.path.join(site, 'days', f'{today}.json')))
+    assert len(d3['f']) == 5, f"duplicated fixtures: {len(d3['f'])}"
+    server.main.config.MODE = 'quick'
+    server.main.LOG.clear()
+    calls.clear()
+    assert server.main.main() == 0
+    assert not [c for c in calls if 'api-sports.io' in c], 'suspended account was called on a quick run'
+
     print(f'\nOK · full run used {used_full} requests, quick run used {m2["requests_used"]}; '
           f'{len(rows)} history rows, {len(positive)} CSV rows mapped, odds on {len(fd_odds)} fixtures')
     shutil.rmtree(tmp)

@@ -23,6 +23,7 @@ LOG = []
 
 
 DONE_CODES = ('FT', 'AET', 'PEN', 'PST', 'CANC', 'ABD', 'AWD', 'WO')
+DIV_LEAGUE = {}
 
 def log(msg):
     line = f'[{config.now_utc():%H:%M:%S}] {msg}'
@@ -192,7 +193,7 @@ def build_history(state, fd_matches, fd_upcoming):
     # (exact name beats a partial one), recomputed every run.
     best_for = {}
     for tid, countries in team_countries.items():
-        if not tid or tid not in teams:
+        if not tid or tid < 0 or tid not in teams:
             continue
         name = teams[tid]['name']
         found = None
@@ -208,6 +209,7 @@ def build_history(state, fd_matches, fd_upcoming):
                 best_for[key] = (tid, score)
     fd_to_api = {k: v[0] for k, v in best_for.items()}
     mapped = len(fd_to_api)
+    global DIV_LEAGUE
     state.name_map = {str(tid): key for key, tid in fd_to_api.items()}
 
     # Learn which API league id each football-data.co.uk division is.
@@ -223,6 +225,7 @@ def build_history(state, fd_matches, fd_upcoming):
         best = max(v.items(), key=lambda x: x[1])
         if best[1] >= 6 and best[1] / sum(v.values()) >= 0.6:
             div_league[div] = best[0]
+    DIV_LEAGUE = div_league
 
     # Existing API pairs (for de-duplication), keyed by home/away and day.
     api_pairs = {}
@@ -269,6 +272,89 @@ def build_history(state, fd_matches, fd_upcoming):
     return history, fd_to_api, api_fixtures
 
 
+# ------------------------------------------------- football-data fallback
+
+def fd_fallback_days(history, fd_matches, fd_upcoming, fd_to_api):
+    """Without API-Football: fill the published days (last week to
+    tomorrow) from football-data.co.uk: its fixtures list (main European
+    divisions, with odds) and its results (which arrive a few days late).
+    API fixtures already on a day are updated, never duplicated."""
+    from datetime import datetime as _dt
+    teams = {t['id']: t for t in history.get('t', [])}
+    leagues = {l['id']: l for l in history.get('l', [])}
+    today = config.today_cm()
+    keys = [config.day_key(today + timedelta(days=i)) for i in range(-7, 2)]
+    by_day = {k: [] for k in keys}
+
+    def season_of(ts):
+        d = _dt.fromtimestamp(ts, config.CAMEROON)
+        return d.year if d.month >= 7 else d.year - 1
+
+    def fixture(m, finished):
+        hk, ak = f"{m['country']}|{m['home']}", f"{m['country']}|{m['away']}"
+        hid = fd_to_api.get(hk) or synthetic_id('team|' + hk)
+        aid = fd_to_api.get(ak) or synthetic_id('team|' + ak)
+        lid = DIV_LEAGUE.get(m['div']) or synthetic_id('league|' + m['div'])
+        info = fdcouk.MAIN.get(m['div'])
+        lg = dict(leagues.get(lid) or {
+            'id': lid, 'name': m.get('league') or (info[1] if info else m['div']),
+            'country': m['country'], 'logo': '', 'flag': '', 'season': season_of(m['ts'])})
+        side = lambda tid, name: {'id': tid, 'name': (teams.get(tid) or {}).get('name') or name,
+                                  'logo': (teams.get(tid) or {}).get('logo') or ''}
+        return {
+            'id': synthetic_id(f"match|{m['div']}|{m['ts'] // 86400}|{m['home']}|{m['away']}"),
+            'ts': m['ts'], 'st': 'FT' if finished else 'NS',
+            'stl': 'Match Finished' if finished else 'Not Started', 'el': None,
+            'lg': lg, 'rd': '', 'vn': '',
+            'h': side(hid, m['home']), 'a': side(aid, m['away']),
+            'hg': m['hg'] if finished else None, 'ag': m['ag'] if finished else None,
+            'fh': m['hg'] if finished else None, 'fa': m['ag'] if finished else None,
+            'src': 'fd',
+        }
+
+    for m in fd_matches:
+        k = config.day_key(_dt.fromtimestamp(m['ts'], config.CAMEROON).date())
+        if k in by_day:
+            by_day[k].append(fixture(m, True))
+    for u in fd_upcoming:
+        k = config.day_key(_dt.fromtimestamp(u['ts'], config.CAMEROON).date())
+        if k in by_day:
+            by_day[k].append(fixture(dict(u, league=None, hg=None, ag=None), False))
+
+    changed_days = 0
+    for k, found in by_day.items():
+        if not found:
+            continue
+        d = load_day(k) or {'f': [], 'final': False}
+        if d.get('final') and not any(f.get('src') == 'fd' for f in d['f']):
+            continue  # a complete API-Football day: leave it alone
+        current = {f['id']: f for f in d['f']}
+        changes = 0
+        for fx in found:
+            if fx['id'] in current:
+                old = current[fx['id']]
+                if old['st'] != 'FT' and fx['st'] == 'FT':
+                    current[fx['id']] = fx
+                    changes += 1
+                continue
+            # The same match from API-Football (either team matched, kickoff within 36 h).
+            twin = next((f for f in current.values() if f.get('src') != 'fd' and abs(f['ts'] - fx['ts']) < 36 * 3600
+                         and (f['h']['id'] == fx['h']['id'] or f['a']['id'] == fx['a']['id'])), None)
+            if twin is not None:
+                if twin['st'] not in DONE_CODES and fx['st'] == 'FT':
+                    twin.update({'st': 'FT', 'stl': 'Match Finished', 'el': None,
+                                 'hg': fx['hg'], 'ag': fx['ag'], 'fh': fx['fh'], 'fa': fx['fa']})
+                    changes += 1
+                continue
+            current[fx['id']] = fx
+            changes += 1
+        if changes:
+            fixtures = sorted(current.values(), key=lambda f: f['ts'])
+            save_day(k, fixtures, day_is_final(k, fixtures))
+            changed_days += 1
+    log(f'football-data.co.uk fallback: {changed_days} day file(s) updated')
+
+
 # ---------------------------------------------------------------- enrichment
 
 def stamp():
@@ -291,9 +377,10 @@ def add_fd_odds(enrich, fd_upcoming, fd_to_api, fixtures):
             by_pair.setdefault((f['h']['id'], f['a']['id']), []).append(f)
     n = 0
     for u in fd_upcoming:
-        hid = fd_to_api.get(f"{u['country']}|{u['home']}")
-        aid = fd_to_api.get(f"{u['country']}|{u['away']}")
-        if not hid or not aid or not (u['o25'] or u.get('win')):
+        hk, ak = f"{u['country']}|{u['home']}", f"{u['country']}|{u['away']}"
+        hid = fd_to_api.get(hk) or synthetic_id('team|' + hk)
+        aid = fd_to_api.get(ak) or synthetic_id('team|' + ak)
+        if not (u['o25'] or u.get('win')):
             continue
         for f in by_pair.get((hid, aid), []):
             if abs(f['ts'] - u['ts']) > 36 * 3600:
@@ -407,8 +494,25 @@ def publish(history, enrich, keys, api, state, mode):
     if os.path.isdir(config.SITE):
         shutil.rmtree(config.SITE)
     os.makedirs(os.path.join(config.SITE, 'days'))
+    import hashlib
+
+    def fingerprint(value):
+        text = json.dumps(value, separators=(',', ':'), ensure_ascii=False)
+        return hashlib.sha1(text.encode('utf-8')).hexdigest()[:16]
+
+    merged = merged_enrich(enrich)
     write_json(os.path.join(config.SITE, 'history.json.gz'), history)
-    write_json(os.path.join(config.SITE, 'enrich.json.gz'), merged_enrich(enrich))
+    write_json(os.path.join(config.SITE, 'enrich.json.gz'), merged)
+    # The app downloads only the files whose fingerprint changed.
+    files = {'history': fingerprint(history), 'enrich': fingerprint(merged), 'days': {}}
+    if mode == 'quick':
+        # Quick runs only add today's API results to the history, which the
+        # app already gets from the day files: keep the full run's fingerprint
+        # so phones do not download the whole history every hour.
+        prev = previous_site_file('manifest.json') or {}
+        old_fp = (prev.get('files') or {}).get('history')
+        if old_fp:
+            files['history'] = old_fp
     today = config.today_cm()
     published = []
     for i in range(-7, 2):
@@ -416,7 +520,9 @@ def publish(history, enrich, keys, api, state, mode):
         d = load_day(k)
         if d is None:
             continue
-        write_json(os.path.join(config.SITE, 'days', f'{k}.json'), {'at': d.get('at'), 'f': d.get('f', [])})
+        body = {'at': d.get('at'), 'f': d.get('f', [])}
+        write_json(os.path.join(config.SITE, 'days', f'{k}.json'), body)
+        files['days'][k] = fingerprint(body['f'])
         published.append(k)
     manifest = {
         'app': 'goal20', 'version': config.VERSION,
@@ -426,6 +532,9 @@ def publish(history, enrich, keys, api, state, mode):
         'provider_limit': api.limit,
         'days': published, 'today': keys['today'], 'tomorrow': keys['tomorrow'],
         'history_results': len(history['m']),
+        'files': files,
+        'api_suspended': state.is_suspended,
+        'api_note': state.suspended_why if state.is_suspended else '',
         'blocked': {k: state.blocked_why.get(k, '') for k in state.blocked},
         'notes': LOG[-40:],
     }
@@ -449,7 +558,12 @@ def main():
     budget = config.FULL_RUN_BUDGET if mode == 'full' else config.QUICK_RUN_BUDGET
     api = Api(state, budget)
     log(f'GOAL20 server {config.VERSION} · mode {mode} · plan {config.PLAN}')
-    if not api.available:
+    if api.available and state.is_suspended and mode != 'full':
+        api.suspended = True
+        log('API-Football account suspended: no API requests this run (rechecked once a day at the full run)')
+    if api.suspended:
+        pass
+    elif not api.available:
         log('No API_FOOTBALL_KEY secret: only football-data.co.uk history will be published')
     else:
         try:
@@ -480,6 +594,9 @@ def main():
     else:
         fd_matches, fd_upcoming = fdcouk.load(log)
         history, fd_to_api, _ = build_history(state, fd_matches, fd_upcoming)
+        if not api.available:
+            fd_fallback_days(history, fd_matches, fd_upcoming, fd_to_api)
+            upcoming = [f for k in (keys['today'], keys['tomorrow']) for f in (load_day(k) or {}).get('f', [])]
         enrich['fdodds'] = {}
         add_fd_odds(enrich, fd_upcoming, fd_to_api, upcoming)
     if mode == 'full' and api.available:

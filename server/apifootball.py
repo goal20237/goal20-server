@@ -13,7 +13,7 @@ HOST = 'https://v3.football.api-sports.io'
 class ApiError(Exception):
     def __init__(self, kind, message):
         super().__init__(message)
-        self.kind = kind  # plan, quota, key, rate, network, other
+        self.kind = kind  # plan, quota, key, rate, network, suspended, other
         self.message = message
 
     @property
@@ -31,10 +31,13 @@ class Api:
         self.limit = None
         self._last = 0.0
         self.spacing = 0.25 if config.IS_PRO else 6.5
+        # Set when API-Football says the account is suspended: no further
+        # requests in this run (a suspended account must not be hammered).
+        self.suspended = False
 
     @property
     def available(self):
-        return bool(config.API_KEY)
+        return bool(config.API_KEY) and not self.suspended
 
     def can_spend(self):
         if not self.available or self.used >= self.budget:
@@ -46,6 +49,8 @@ class Api:
         return until is not None and until > time.time()
 
     def get(self, endpoint, params=None, cap=None, counts=True):
+        if self.suspended:
+            raise ApiError('suspended', 'API-Football account suspended: no requests sent')
         if not self.available:
             raise ApiError('key', 'No API_FOOTBALL_KEY secret is set')
         if cap and self.blocked(cap):
@@ -90,6 +95,10 @@ class Api:
             text = ' · '.join(v for _, v in pairs).replace(config.API_KEY, '[key]')
             keys = {k for k, _ in pairs}
             low = text.lower()
+            if 'suspend' in low:
+                self.suspended = True
+                self.state.suspend(text)
+                raise ApiError('suspended', text)
             if 'token' in keys or 'application key' in low:
                 kind = 'key'
             elif 'requests' in keys or 'request limit' in low:
