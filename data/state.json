@@ -671,5 +671,7 @@
   "2026-11-10"
  ],
  "last_full": "2026-11-10T05:56:09.182464+00:00",
- "plan_name": "Free"
+ "plan_name": "Free",
+ "suspended_until": 1794371975.3900805,
+ "suspended_why": "Your account is suspended, check on https://dashboard.api-football.com."
 }
