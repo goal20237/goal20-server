@@ -190,6 +190,7 @@ def main():
     calls.clear()
     assert server.main.main() == 0
     m3 = json.load(open(os.path.join(site, 'manifest.json')))
+    assert m3['today'] in m3['days'] and m3['tomorrow'] in m3['days'], 'today/tomorrow must always be published'
     assert m3['api_suspended'] is True and 'suspended' in m3['api_note'], m3.get('api_note')
     assert len([c for c in calls if 'api-sports.io' in c]) == 1, [c for c in calls if 'api-sports.io' in c]
     d3 = json.load(open(os.path.join(site, 'days', f'{today}.json')))

@@ -706,7 +706,12 @@ def publish(history, enrich, keys, api, state, mode):
         k = config.day_key(today + timedelta(days=i))
         d = load_day(k)
         if d is None:
-            continue
+            if i < 0:
+                continue
+            # Today and tomorrow are always published, even with no match
+            # (e.g. an international break), so the app shows 0 matches
+            # instead of a missing-file error.
+            d = {'at': config.now_utc().isoformat(), 'f': []}
         body = {'at': d.get('at'), 'f': d.get('f', [])}
         write_json(os.path.join(config.SITE, 'days', f'{k}.json'), body)
         files['days'][k] = fingerprint(body['f'])
