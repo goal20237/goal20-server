@@ -77,13 +77,19 @@ def main():
     tmp = tempfile.mkdtemp()
     shutil.copytree(SRC, os.path.join(tmp, 'server'))
     sys.path.insert(0, tmp)
-    os.environ.update({'API_FOOTBALL_KEY': 'TESTKEY', 'PLAN': 'free', 'MODE': 'full'})
+    os.environ.update({'API_FOOTBALL_KEY': 'TESTKEY', 'PLAN': 'free', 'MODE': 'full',
+                       'FOOTBALL_DATA_ORG_KEY': 'ORGKEY'})
     days, csv_e0, csv_fix = build_world()
     calls = []
     suspended = {'on': False}
 
+    fdorg_matches = []
+
     def fake_fetch(url, headers=None, timeout=40, retries=2):
         calls.append(url)
+        if 'api.football-data.org' in url:
+            assert headers['X-Auth-Token'] == 'ORGKEY'
+            return 200, {}, json.dumps({'matches': fdorg_matches}).encode()
         hdr = {'x-ratelimit-requests-remaining': '80', 'x-ratelimit-requests-limit': '100'}
         if 'api-sports.io' in url:
             assert headers['x-apisports-key'] == 'TESTKEY'
@@ -119,10 +125,14 @@ def main():
     import server.net
     import server.apifootball
     import server.fdcouk
+    import server.fdorg
     import server.main
-    for mod in (server.net, server.apifootball, server.fdcouk, server.main):
+    for mod in (server.net, server.apifootball, server.fdcouk, server.fdorg, server.main):
         importlib.reload(mod)
         mod.fetch = fake_fetch
+    import types
+    import time as _time
+    server.fdorg.time = types.SimpleNamespace(time=_time.time, sleep=lambda s: None)
     server.apifootball.Api.__init__.__defaults__  # noqa
     # No sleeping between fake requests.
     orig_init = server.apifootball.Api.__init__
@@ -189,6 +199,73 @@ def main():
     calls.clear()
     assert server.main.main() == 0
     assert not [c for c in calls if 'api-sports.io' in c], 'suspended account was called on a quick run'
+
+    # football-data.org while suspended: a finished match updates its API
+    # twin (no double), new matches are added, extra time keeps the 90' score.
+    first = days[today][0]
+    tomorrow = m3['tomorrow']
+    t_ts = int(datetime.strptime(tomorrow, '%Y-%m-%d').replace(tzinfo=CM).timestamp()) + 19 * 3600
+
+    def org(mid, ts, home, away, status, comp, area, score=None):
+        return {'id': mid, 'utcDate': datetime.fromtimestamp(ts, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'status': status, 'matchday': 12, 'competition': comp, 'area': area,
+                'season': {'startDate': '2026-08-15'},
+                'homeTeam': home, 'awayTeam': away, 'score': score or {'duration': 'REGULAR', 'fullTime': {'home': None, 'away': None}}}
+
+    pl = {'id': 2021, 'code': 'PL', 'name': 'Premier League', 'emblem': 'pl.png'}
+    eng = {'name': 'England', 'flag': 'eng.svg'}
+    h0, a0 = first['teams']['home'], first['teams']['away']
+    fdorg_matches[:] = [
+        org(9001, first['fixture']['timestamp'], {'id': 501, 'name': h0['name'] + ' FC', 'shortName': h0['name']},
+            {'id': 502, 'name': a0['name'] + ' FC', 'shortName': a0['name']}, 'FINISHED', pl, eng,
+            {'duration': 'REGULAR', 'fullTime': {'home': 2, 'away': 1}}),
+        org(9002, t_ts, {'id': 402, 'name': 'Brentford FC', 'shortName': 'Brentford'},
+            {'id': 63, 'name': 'Fulham FC', 'shortName': 'Fulham'}, 'TIMED', pl, eng),
+        org(9003, t_ts + 3600, {'id': 1765, 'name': 'Fluminense FC', 'shortName': 'Fluminense'},
+            {'id': 1769, 'name': 'SE Palmeiras', 'shortName': 'Palmeiras'}, 'SCHEDULED',
+            {'id': 2013, 'code': 'BSA', 'name': 'Campeonato Brasileiro Série A'}, {'name': 'Brazil'}),
+        org(9004, first['fixture']['timestamp'] - 3600, {'id': 86, 'name': 'Real Madrid CF', 'shortName': 'Real Madrid'},
+            {'id': 5, 'name': 'FC Bayern München', 'shortName': 'Bayern'}, 'FINISHED',
+            {'id': 2001, 'code': 'CL', 'name': 'UEFA Champions League'}, {'name': 'Europe'},
+            {'duration': 'EXTRA_TIME', 'fullTime': {'home': 3, 'away': 2}, 'regularTime': {'home': 1, 'away': 1},
+             'extraTime': {'home': 2, 'away': 1}}),
+    ]
+    server.main.config.MODE = 'quick'
+    server.main.LOG.clear()
+    calls.clear()
+    assert server.main.main() == 0
+    assert len([c for c in calls if 'football-data.org' in c]) == 1
+    assert not [c for c in calls if 'api-sports.io' in c]
+    d4 = json.load(open(os.path.join(site, 'days', f'{today}.json')))
+    assert len(d4['f']) == 6, f"today should be 5 API + 1 cup match, got {len(d4['f'])}"
+    twin = next(f for f in d4['f'] if f['id'] == first['fixture']['id'])
+    assert twin['st'] == 'FT' and (twin['hg'], twin['ag']) == (2, 1), twin
+    cup = next(f for f in d4['f'] if f.get('xid') == 9004)
+    assert cup['st'] == 'AET' and (cup['fh'], cup['fa']) == (1, 1) and (cup['hg'], cup['ag']) == (3, 2) and cup['lg']['id'] == 2
+    t4 = json.load(open(os.path.join(site, 'days', f'{tomorrow}.json')))
+    new = [f for f in t4['f'] if f.get('src') == 'fdorg']
+    assert {f['xid'] for f in new} >= {9003}, new
+    m4 = json.load(open(os.path.join(site, 'manifest.json')))
+    assert 'football-data.org' in m4['sources'] and 'football-data.org' in m4['status_note']
+    h4 = json.loads(gzip.open(os.path.join(site, 'history.json.gz')).read())
+    assert any(r[0] == first['fixture']['id'] and r[6:8] == [2, 1] for r in h4['m']), 'finished twin not in history'
+    # Running again changes nothing (no doubles).
+    server.main.LOG.clear()
+    assert server.main.main() == 0
+    d5 = json.load(open(os.path.join(site, 'days', f'{today}.json')))
+    assert len(d5['f']) == 6
+    h5 = json.loads(gzip.open(os.path.join(site, 'history.json.gz')).read())
+    assert len(h5['m']) == len(h4['m']), (len(h5['m']), len(h4['m']))
+    # A full run on top keeps everything single.
+    server.main.config.MODE = 'full'
+    server.main.LOG.clear()
+    assert server.main.main() == 0
+    d6 = json.load(open(os.path.join(site, 'days', f'{today}.json')))
+    assert len(d6['f']) == 6, len(d6['f'])
+    h6 = json.loads(gzip.open(os.path.join(site, 'history.json.gz')).read())
+    ids = [r[0] for r in h6['m']]
+    assert len(ids) == len(set(ids))
+    assert sum(1 for r in h6['m'] if (r[4], r[5]) == (twin['h']['id'], twin['a']['id']) and abs(r[1] - twin['ts']) < 6 * 3600) == 1
 
     print(f'\nOK · full run used {used_full} requests, quick run used {m2["requests_used"]}; '
           f'{len(rows)} history rows, {len(positive)} CSV rows mapped, odds on {len(fd_odds)} fixtures')

@@ -34,6 +34,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     env:
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+      FOOTBALL_DATA_ORG_KEY: ${{ secrets.FOOTBALL_DATA_ORG_KEY }}
       PLAN: ${{ vars.PLAN || 'free' }}
       MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || ((github.event_name == 'push' || github.event.schedule == '7 5 * * *') && 'full' || 'quick') }}
     steps:

@@ -12,6 +12,7 @@ import sys
 from datetime import datetime, timedelta
 
 from . import config, fdcouk, rank
+from . import fdorg
 from .apifootball import Api, ApiError, hist_row, parse_odds, to_app_fixture
 from .names import Matcher
 from .net import fetch
@@ -226,6 +227,7 @@ def build_history(state, fd_matches, fd_upcoming):
         if best[1] >= 6 and best[1] / sum(v.values()) >= 0.6:
             div_league[div] = best[0]
     DIV_LEAGUE = div_league
+    state.div_league = dict(div_league)
 
     # Existing API pairs (for de-duplication), keyed by home/away and day.
     api_pairs = {}
@@ -353,6 +355,177 @@ def fd_fallback_days(history, fd_matches, fd_upcoming, fd_to_api):
             save_day(k, fixtures, day_is_final(k, fixtures))
             changed_days += 1
     log(f'football-data.co.uk fallback: {changed_days} day file(s) updated')
+
+
+# ------------------------------------------------------ football-data.org
+
+def _team_index(history):
+    """country -> {team name: GOAL20 team id}, from the published history."""
+    country_of = {l['id']: l.get('country') or '' for l in history.get('l', [])}
+    name_of = {t['id']: t.get('name') or '' for t in history.get('t', [])}
+    index = {}
+    for r in history.get('m', []):
+        c = country_of.get(r[2])
+        if not c:
+            continue
+        for tid in (r[4], r[5]):
+            n = name_of.get(tid)
+            if not n:
+                continue
+            names = index.setdefault(c, {})
+            # Prefer API-Football ids (they carry logos and live data).
+            if n not in names or (tid > 0 and names[n] < 0):
+                names[n] = tid
+    return index
+
+
+def merge_fdorg(history, state, full):
+    """Same-day fixtures and results for football-data.org's 12 competitions,
+    merged into the day files (existing matches are updated, never doubled)."""
+    from datetime import datetime as _dt
+    today_utc = config.now_utc().date()
+    start = today_utc - timedelta(days=7 if full else 2)
+    try:
+        raw = fdorg.matches(start, today_utc + timedelta(days=1), log)
+    except fdorg.FdOrgError as e:
+        log(f'football-data.org: {e}')
+        return 0
+    teams = {t['id']: t for t in history.get('t', [])}
+    leagues = {l['id']: l for l in history.get('l', [])}
+    index = _team_index(history)
+    matcher = Matcher({c: set(n) for c, n in index.items()})
+
+    def team_id(team, area, comp):
+        xid = team.get('id')
+        name = team.get('shortName') or team.get('name') or ''
+        crest = team.get('crest') or ''
+        if not xid or not name:
+            return None, '', ''
+        tid = state.fdorg_teams.get(str(xid))
+        if tid is None:
+            country = area.get('name') or ''
+            hit = None
+            for candidate in {team.get('name') or '', name}:
+                if not candidate:
+                    continue
+                h = (matcher.match(candidate, country, comp.get('name') or '') if country in index
+                     else matcher.match_any(candidate, comp.get('name') or ''))
+                if h and (hit is None or h[1] > hit[1]):
+                    hit = h
+            if hit:
+                c, n = hit[0].split('|', 1)
+                tid = index[c][n]
+                state.fdorg_teams[str(xid)] = tid
+            else:
+                tid = synthetic_id(f'fdorg-team|{xid}')
+        known = teams.get(tid) or {}
+        return tid, known.get('name') or name, known.get('logo') or crest
+
+    def league_for(comp, area, season):
+        code = comp.get('code') or ''
+        if code in fdorg.DIVISION:
+            div = fdorg.DIVISION[code]
+            lid = state.div_league.get(div) or synthetic_id('league|' + div)
+        elif code in fdorg.CUP_LEAGUE:
+            lid = fdorg.CUP_LEAGUE[code]
+        else:
+            lid = synthetic_id(f'league|fdorg-{code or comp.get("id")}')
+        base = leagues.get(lid) or {}
+        return {
+            'id': lid,
+            'name': base.get('name') or comp.get('name') or code,
+            'country': base.get('country') or area.get('name') or '',
+            'logo': base.get('logo') or comp.get('emblem') or '',
+            'flag': base.get('flag') or area.get('flag') or '',
+            'season': season,
+        }
+
+    keys = [config.day_key(config.today_cm() + timedelta(days=i)) for i in range(-7, 2)]
+    by_day = {k: [] for k in keys}
+    for m in raw:
+        fx = fdorg.to_fixture(m, team_id, league_for)
+        if fx is None or not fx.get('xid'):
+            continue
+        fx['id'] = synthetic_id(f"fdorg|{fx['xid']}")
+        k = config.day_key(_dt.fromtimestamp(fx['ts'], config.CAMEROON).date())
+        if k in by_day:
+            by_day[k].append(fx)
+
+    fields = ('st', 'stl', 'el', 'hg', 'ag', 'fh', 'fa')
+    changed_days, total = 0, 0
+    for k, found in by_day.items():
+        if not found:
+            continue
+        total += len(found)
+        d = load_day(k) or {'f': [], 'final': False}
+        current = {f['id']: f for f in d['f']}
+        changes = 0
+        for fx in found:
+            old = current.get(fx['id'])
+            if old is not None:
+                if any(old.get(x) != fx.get(x) for x in fields + ('ts',)):
+                    current[fx['id']] = fx
+                    changes += 1
+                continue
+            twin = None
+            for f in current.values():
+                if f.get('src') == 'fdorg':
+                    continue
+                gap = abs(f['ts'] - fx['ts'])
+                same_h, same_a = f['h']['id'] == fx['h']['id'], f['a']['id'] == fx['a']['id']
+                if (same_h and same_a and gap < 36 * 3600) or (
+                        (same_h or same_a) and f['lg']['id'] == fx['lg']['id'] and gap < 3 * 3600):
+                    twin = f
+                    break
+            if twin is not None:
+                # An API-Football result is kept; anything else takes the newer data.
+                if twin.get('src') != 'fd' and twin['st'] in DONE_CODES:
+                    continue
+                before = {x: twin.get(x) for x in fields + ('ts',)}
+                twin.update({x: fx[x] for x in fields})
+                if twin.get('src') == 'fd' and fx['st'] == 'NS':
+                    twin['ts'] = fx['ts']  # football-data.org has the exact kickoff
+                if any(twin.get(x) != before[x] for x in before):
+                    changes += 1
+                continue
+            current[fx['id']] = fx
+            changes += 1
+        if changes:
+            fixtures = sorted(current.values(), key=lambda f: f['ts'])
+            save_day(k, fixtures, day_is_final(k, fixtures))
+            changed_days += 1
+    log(f'football-data.org: {len(raw)} matches read, {total} in published days, {changed_days} day file(s) updated')
+    return total
+
+
+def add_finished_rows(history):
+    """Adds finished matches from the published day files to the history."""
+    known = {r[0] for r in history['m']}
+    pairs = {}
+    for r in history['m']:
+        pairs.setdefault((r[4], r[5]), []).append(r[1])
+    added = 0
+    today = config.today_cm()
+    for i in range(-7, 1):
+        for f in (load_day(config.day_key(today + timedelta(days=i))) or {}).get('f', []):
+            r = hist_row(f)
+            if not r or r[0] in known:
+                continue
+            # The same match already stored under another id (kickoff times
+            # of the sources differ by an hour or two at most).
+            if any(abs(t - r[1]) < 6 * 3600 for t in pairs.get((r[4], r[5]), [])):
+                continue
+            history['m'].append(r)
+            known.add(r[0])
+            pairs.setdefault((r[4], r[5]), []).append(r[1])
+            added += 1
+            for side in ('h', 'a'):
+                t = f[side]
+                if t['id'] and not any(x['id'] == t['id'] for x in history['t']):
+                    history['t'].append({'id': t['id'], 'name': t['name'], 'logo': t['logo']})
+            if f['lg']['id'] and not any(x['id'] == f['lg']['id'] for x in history['l']):
+                history['l'].append(f['lg'])
+    return added
 
 
 # ---------------------------------------------------------------- enrichment
@@ -490,6 +663,20 @@ def previous_site_file(name):
             return None
 
 
+def status_note(api, state):
+    """Shown on the app's Home screen when data is limited ('' = nothing)."""
+    if api.available:
+        return ''
+    head = ('API-Football account suspended: ' if state.is_suspended
+            else 'No API-Football key: ')
+    if fdorg.available():
+        return (head + 'your GOAL20 server now uses football-data.org (12 top competitions, results the same day, '
+                'scores delayed, no live scores) and football-data.co.uk (more European leagues and odds; their '
+                'results arrive a few days late).')
+    return (head + 'your GOAL20 server now uses football-data.co.uk only (main European leagues; results arrive '
+            'a few days late; no live scores).')
+
+
 def publish(history, enrich, keys, api, state, mode):
     if os.path.isdir(config.SITE):
         shutil.rmtree(config.SITE)
@@ -535,6 +722,9 @@ def publish(history, enrich, keys, api, state, mode):
         'files': files,
         'api_suspended': state.is_suspended,
         'api_note': state.suspended_why if state.is_suspended else '',
+        'sources': [x for x, on in (('api-football', api.available), ('football-data.org', not api.available and fdorg.available()),
+                                     ('football-data.co.uk', True)) if on],
+        'status_note': status_note(api, state),
         'blocked': {k: state.blocked_why.get(k, '') for k in state.blocked},
         'notes': LOG[-40:],
     }
@@ -582,20 +772,22 @@ def main():
     enrich = load_enrich()
     upcoming = [f for k in (keys['today'], keys['tomorrow']) for f in (load_day(k) or {}).get('f', [])]
     previous = previous_site_file('history.json.gz') if mode == 'quick' else None
+    use_fdorg = not api.available and fdorg.available()
     if previous and previous.get('m'):
-        # Quick run: reuse the last full history and add today's finished matches.
+        # Quick run: reuse the last full history and add the finished matches.
         history = previous
-        known = {r[0] for r in history['m']}
-        for f in [f for k in (keys['today'], keys.get('yesterday', '')) for f in (load_day(k) or {}).get('f', [])]:
-            r = hist_row(f)
-            if r and r[0] not in known:
-                history['m'].append(r)
-        log(f'Quick run: reused published history ({len(history["m"])} results)')
+        if use_fdorg:
+            merge_fdorg(history, state, full=False)
+        added = add_finished_rows(history)
+        log(f'Quick run: reused published history ({len(history["m"])} results, {added} new)')
     else:
         fd_matches, fd_upcoming = fdcouk.load(log)
         history, fd_to_api, _ = build_history(state, fd_matches, fd_upcoming)
         if not api.available:
             fd_fallback_days(history, fd_matches, fd_upcoming, fd_to_api)
+            if use_fdorg:
+                merge_fdorg(history, state, full=True)
+                add_finished_rows(history)
             upcoming = [f for k in (keys['today'], keys['tomorrow']) for f in (load_day(k) or {}).get('f', [])]
         enrich['fdodds'] = {}
         add_fd_odds(enrich, fd_upcoming, fd_to_api, upcoming)
