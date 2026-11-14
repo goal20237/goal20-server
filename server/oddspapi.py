@@ -33,9 +33,76 @@ FETCH_AFTER_UTC = (6, 45)
 
 DIR = os.path.join(config.DATA, 'op')
 
-# Country names that differ between sources.
+# Country names that differ between sources ("X Amateur" is OddsPapi's
+# category for lower divisions of country X).
 COUNTRY = {'czechia': 'czech republic', 'korea republic': 'south korea', 'republic of korea': 'south korea',
-           'united states': 'usa', 'usa': 'usa', 'turkiye': 'turkey', 'ivory coast': "cote d'ivoire"}
+           'united states': 'usa', 'turkiye': 'turkey', 'ivory coast': "cote d'ivoire"}
+
+# GOAL20 league (country, name) -> OddsPapi tournament id, checked against
+# OddsPapi's list on 14 Nov 2026. Names from football-charts.com,
+# football-data.co.uk and football-data.org. Anything else is matched by name.
+KNOWN = [
+    ('Algeria', ['Ligue 1'], 841), ('Australia', ['A-League'], 136),
+    ('Austria', ['Bundesliga'], 45), ('Austria', ['2. Liga'], 135),
+    ('Azerbaijan', ['Premier League'], 709),
+    ('Belgium', ['Jupiler Pro League', 'Pro League', 'First Division A'], 38),
+    ('Belgium', ['Challenger Pro League', 'First Division B'], 9),
+    ('Brazil', ['Serie A Betano', 'Serie A', 'Campeonato Brasileiro Serie A', 'Brasileirao'], 325),
+    ('Brazil', ['Serie B', 'Campeonato Brasileiro Serie B'], 390),
+    ('Bulgaria', ['efbet League', 'First League', 'Parva Liga'], 247),
+    ('China', ['Super League', 'Chinese Super League'], 649),
+    ('Czech Republic', ['Chance Liga', '1. Liga', 'First League'], 172),
+    ('Czech Republic', ['ChNL', 'FNL', 'National Football League'], 205),
+    ('Czech Republic', ['3. CFL - Group A', '3. CFL - Group B', 'CFL'], 14151),
+    ('Denmark', ['Superliga'], 39), ('Denmark', ['1st Division', '1. Division'], 47),
+    ('Egypt', ['Premier League'], 808),
+    ('England', ['Premier League'], 17), ('England', ['Championship'], 18),
+    ('England', ['League One'], 24), ('England', ['League Two'], 25), ('England', ['National League'], 173),
+    ('Estonia', ['Meistriliiga', 'Premium Liiga'], 178),
+    ('Finland', ['Veikkausliiga'], 41), ('Finland', ['Ykkosliiga'], 55),
+    ('France', ['Ligue 1'], 34), ('France', ['Ligue 2'], 182), ('France', ['Ligue 3', 'National'], 183),
+    ('Germany', ['Bundesliga', '1. Bundesliga'], 35), ('Germany', ['2. Bundesliga'], 44), ('Germany', ['3. Liga'], 491),
+    ('Greece', ['Super League', 'Super League 1'], 185), ('Greece', ['Super League 2'], 186),
+    ('Netherlands', ['Eredivisie'], 37), ('Netherlands', ['Eerste Divisie'], 131),
+    ('Netherlands', ['Tweede Divisie'], 26278),
+    ('Hungary', ['NB I.', 'NB I'], 187), ('Hungary', ['NB II.', 'NB II'], 1339),
+    ('India', ['ISL', 'Indian Super League'], 1900),
+    ('Ireland', ['Premier Division'], 192), ('Ireland', ['Division 1', 'First Division'], 193),
+    ('Italy', ['Serie A'], 23), ('Italy', ['Serie B'], 53),
+    ('Italy', ['Serie C - Group A'], 26554), ('Italy', ['Serie C - Group B'], 26556),
+    ('Japan', ['J1 League', 'J-League', 'J League'], 196), ('Japan', ['J2 League'], 402),
+    ('South Korea', ['K League 1'], 410), ('South Korea', ['K League 2'], 777),
+    ('Kuwait', ['Premier League'], 1002), ('Latvia', ['Virsliga'], 197), ('Lithuania', ['TOPLYGA', 'A Lyga'], 198),
+    ('Morocco', ['Botola Pro'], 937), ('Norway', ['Eliteserien'], 20),
+    ('Poland', ['Ekstraklasa'], 202), ('Poland', ['Division 1', '1. Liga'], 229),
+    ('Portugal', ['Liga Portugal', 'Primeira Liga'], 238), ('Portugal', ['Liga Portugal 2'], 239),
+    ('Spain', ['Primera RFEF - Group 1', 'Primera RFEF - Group 2', 'Primera Federacion'], 34834),
+    ('Spain', ['Segunda RFEF - Group 1', 'Segunda RFEF - Group 2', 'Segunda RFEF - Group 3',
+               'Segunda RFEF - Group 4', 'Segunda RFEF - Group 5', 'Segunda Federacion'], 544),
+    ('Spain', ['LaLiga', 'La Liga', 'Primera Division'], 8), ('Spain', ['LaLiga2', 'Segunda Division', 'LaLiga 2'], 54),
+    ('Romania', ['Superliga', 'Liga 1', 'Liga I'], 152), ('Russia', ['Premier League'], 203),
+    ('Saudi Arabia', ['Saudi Professional League', 'Pro League'], 955), ('Saudi Arabia', ['Division 1'], 2298),
+    ('Scotland', ['Premiership'], 36), ('Scotland', ['Championship'], 206),
+    ('Scotland', ['League One'], 207), ('Scotland', ['League Two'], 209),
+    ('Serbia', ['Mozzart Bet Super Liga', 'Super Liga', 'Superliga'], 210),
+    ('Slovakia', ['Nike liga', 'Super Liga', 'Superliga'], 211), ('Slovakia', ['2. liga'], 224),
+    ('Slovenia', ['Prva liga', 'PrvaLiga'], 212),
+    ('Sweden', ['Allsvenskan'], 40), ('Sweden', ['Superettan'], 46),
+    ('Switzerland', ['Super League'], 215), ('Switzerland', ['Challenge League'], 216),
+    ('Thailand', ['Thai League 1'], 1032),
+    ('Turkey', ['Super Lig'], 52), ('Turkey', ['1. Lig'], 98),
+    ('USA', ['MLS', 'Major League Soccer'], 242),
+    ('Mexico', ['Liga MX'], 27464), ('Argentina', ['Liga Profesional', 'Primera LPF'], 155),
+]
+
+
+def _plain(text):
+    import re
+    import unicodedata
+    s = unicodedata.normalize('NFKD', text or '').encode('ascii', 'ignore').decode().lower()
+    s = re.sub(r'[^a-z0-9 ]+', ' ', s)
+    words = {'one': '1', 'two': '2', 'three': '3', 'nord': 'north', 'sud': 'south', 'ost': 'east'}
+    return ' '.join(words.get(w, w) for w in s.split())
 
 
 class OpError(Exception):
@@ -171,28 +238,45 @@ def _markets_map(rows):
 
 SPONSORS = {'betano', 'efbet', 'mozzart', 'bet', 'nike', 'chance', 'superbet', 'betclic', 'tipsport', 'fortuna',
             'betway', 'sky', 'bet365', 'hervis', 'admiral', 'win2day'}
+NOT_FIRST_TEAMS = ('women', 'u1', 'u2', 'youth', 'junior', 'reserve', 'primavera', 'virtual', 'srl',
+                   'senioren', 'niu', 'not use', 'not in use', 'esoccer', 'electronic', 'kings league')
 
 
 def _league_name(name):
-    words = [w for w in norm(name or '').split() if w not in SPONSORS]
-    return ' '.join(words) or norm(name or '')
+    words = [w for w in _plain(name).split() if w not in SPONSORS]
+    return ' '.join(words) or _plain(name)
 
 
 def _country(c):
-    c = norm(c or '')
+    c = _plain(c)
+    if c.endswith(' amateur'):
+        c = c[:-8]
     return COUNTRY.get(c, c)
 
 
+_KNOWN = {(_country(c), _league_name(n)): tid for c, names, tid in KNOWN for n in names}
+
+
 def match_tournaments(leagues, tournaments):
-    """GOAL20 league id -> OddsPapi tournament id, by country and name."""
+    """GOAL20 league id -> OddsPapi tournament id: the checked list first,
+    then by country and name (first teams only)."""
+    ids = {t.get('tournamentId') for t in tournaments}
     by_country = {}
     for t in tournaments:
+        tname = (t.get('tournamentName') or '').lower()
+        cat = (t.get('categoryName') or '').lower()
+        if any(w in tname for w in NOT_FIRST_TEAMS) or 'virtual' in cat or 'simulated' in cat:
+            continue
         by_country.setdefault(_country(t.get('categoryName')), []).append(t)
     out = {}
     for lid, (name, country) in leagues.items():
+        known = _KNOWN.get((_country(country), _league_name(name)))
+        if known in ids:
+            out[lid] = known
+            continue
         cands = by_country.get(_country(country)) or []
         target = _league_name(name)
-        scored = sorted(((similarity(target, _league_name(t.get('tournamentName') or '')), t) for t in cands),
+        scored = sorted(((similarity(target, _league_name(t.get('tournamentName'))), t) for t in cands),
                         key=lambda x: -x[0])
         if scored and scored[0][0] >= 0.72 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.05):
             out[lid] = scored[0][1]['tournamentId']
@@ -264,8 +348,11 @@ def refresh(fixtures, enrich, log, stamp):
         leagues[lg['id']] = (lg.get('name') or '', lg.get('country') or '')
         count[lg['id']] = count.get(lg['id'], 0) + 1
     tmap = match_tournaments(leagues, meta.get('tournaments') or [])
+    # Leagues betPawa had no matches for are skipped for two days.
+    recent_empty = (day - timedelta(days=2)).isoformat()
+    empty = {k: v for k, v in (meta.get('empty') or {}).items() if v >= recent_empty}
     ranked = [tmap[l] for l in sorted(count, key=lambda l: -count[l]) if l in tmap]
-    ranked = list(dict.fromkeys(ranked))
+    ranked = [t for t in dict.fromkeys(ranked) if str(t) not in empty]
     calls = min(DAILY_MAX, left)
     batches = [ranked[i:i + PER_CALL] for i in range(0, len(ranked), PER_CALL)][:calls]
     names = _load('participants.json.gz', {}) or {}
@@ -284,12 +371,21 @@ def refresh(fixtures, enrich, log, stamp):
             rows = client._get('odds-by-tournaments', {'tournamentIds': ','.join(str(t) for t in batch),
                                                        'bookmaker': BOOKMAKER, 'language': 'en', 'oddsFormat': 'decimal'})
         except OpError as e:
+            if 'FIXTURE_NOT_FOUND' in str(e) or 'No fixtures found' in str(e):
+                for t in batch:
+                    empty[str(t)] = day.isoformat()
+                continue
             log(f'OddsPapi: {e}')
             if client.stopped:
                 break
             continue
         rows = rows if isinstance(rows, list) else ((rows or {}).get('data') if isinstance(rows, dict) else None) or []
-        rows_all += [r for r in rows if isinstance(r, dict)]
+        rows = [r for r in rows if isinstance(r, dict)]
+        seen = {str(r.get('tournamentId')) for r in rows if (r.get('bookmakerOdds') or {}).get(BOOKMAKER)}
+        for t in batch:
+            if str(t) not in seen:
+                empty[str(t)] = day.isoformat()
+        rows_all += rows
     # Team names: in the odds rows, else from OddsPapi's name list (one
     # request, kept for a month).
     unnamed = [r for r in rows_all if not r.get('participant1Name')
@@ -346,10 +442,13 @@ def refresh(fixtures, enrich, log, stamp):
     if missing_names:
         log(f'OddsPapi: {missing_names} priced matches without team names (names list is read again next week)')
     meta['last_fetch'] = now.isoformat()[:19]
+    meta['empty'] = empty
     _save('meta.json', meta)
     unlinked = [f'{c} {n}'.strip() for l, (n, c) in leagues.items() if l not in tmap]
-    line = (f'betPawa prices on {priced} matches ({read} read in {len(batches)} call(s), '
-            f'{len(tmap)} leagues linked); {used + client.used}/{limit} requests this month')
+    skipped = len([t for t in empty if empty[t] == day.isoformat()])
+    line = (f'betPawa prices on {priced} matches ({read} read in {spent} call(s), {len(tmap)} leagues linked'
+            f'{f", {skipped} with no betPawa matches skipped for 2 days" if skipped else ""}); '
+            f'{used + client.used}/{limit} requests this month')
     if unlinked:
         line += f'; not linked: {", ".join(sorted(unlinked)[:6])}' + (' ...' if len(unlinked) > 6 else '')
     return line
