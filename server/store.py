@@ -45,6 +45,7 @@ class State:
         self.plan_name = raw.get('plan_name')
         self.div_league = raw.get('div_league') or {}
         self.fdorg_teams = raw.get('fdorg_teams') or {}
+        self.fc_teams = raw.get('fc_teams') or {}
         self.suspended_until = raw.get('suspended_until') or 0
         self.suspended_why = raw.get('suspended_why') or ''
 
@@ -69,6 +70,7 @@ class State:
             'name_map': self.name_map, 'window': self.window,
             'last_full': self.last_full, 'plan_name': self.plan_name,
             'div_league': self.div_league, 'fdorg_teams': self.fdorg_teams,
+            'fc_teams': self.fc_teams,
             'suspended_until': self.suspended_until if self.is_suspended else 0,
             'suspended_why': self.suspended_why if self.is_suspended else '',
         }, compact=False)

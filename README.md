@@ -64,6 +64,12 @@ In the repository: **Settings → Secrets and variables → Actions → New repo
 
 If you have a paid plan, open the **Variables** tab → **New repository variable**, with name `PLAN` and value `pro`.
 
+Free data sources (each optional, each its own secret; never share a key):
+- `FOOTBALL_DATA_ORG_KEY`: football-data.org, 12 top competitions, results the same day.
+- `FOOTBALL_CHARTS_KEY`: football-charts.com, about 80 more leagues (lower divisions, Africa, Asia),
+  fixtures and results once a day. Free key: 200 requests a day for personal use; GOAL20 uses at
+  most 185. Credit: "Data by football-charts.com". The cache is kept in `data/fc/`.
+
 ### 5. Turn on the website (GitHub Pages)
 **Settings → Pages → Build and deployment → Source: GitHub Actions**
 

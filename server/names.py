@@ -32,7 +32,7 @@ DROP = {'fc', 'cf', 'afc', 'sc', 'ac', 'as', 'ss', 'sv', 'fk', 'bk', 'if', 'cd',
 # Reserve, youth and women's sides must never take a first team's results.
 YOUTH = re.compile(
     r'(\bU\d{2}\b|\bW\b|women|femen|fem\.?$|ladies|reserves?\b|\bII\b|\bIII\b|'
-    r'\bB\b$|\bC\b$|\bjong\b|castilla|youth|academy|primavera|juniors?\b)', re.I)
+    r'\bB\b$|\bC\b$|\bjong\b|castilla|youth|academy|primavera|juniors?\b|next ?gen\b)', re.I)
 
 
 def norm(name):

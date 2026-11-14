@@ -13,8 +13,9 @@ from datetime import datetime, timedelta
 
 from . import config, fdcouk, rank
 from . import fdorg
+from . import fcharts
 from .apifootball import Api, ApiError, hist_row, parse_odds, to_app_fixture
-from .names import Matcher
+from .names import Matcher, is_youth, norm
 from .net import fetch
 from .store import (State, all_day_keys, load_day, load_enrich, save_day,
                     save_enrich, write_json)
@@ -498,6 +499,205 @@ def merge_fdorg(history, state, full):
     return total
 
 
+# ------------------------------------------------------ football-charts.com
+
+def merge_fcharts(history, state, fetch_allowed):
+    """Fixtures and results of about 80 more leagues from football-charts.com
+    (read once a day, kept in data/fc/). Adds their results to the history,
+    their next matches to the day files, and fills in finished scores."""
+    if not fcharts.available():
+        return 0
+    if fetch_allowed:
+        try:
+            log('football-charts.com: ' + fcharts.refresh(log))
+        except Exception as e:  # a source problem must never stop the run
+            log(f'football-charts.com: {fcharts._mask(e)}')
+    leagues, fixtures, results = fcharts.cached()
+    if not leagues:
+        return 0
+    from datetime import datetime as _dt, timezone as _tz
+    teams = {t['id']: t for t in history.get('t', [])}
+    lgs = {l['id']: l for l in history.get('l', [])}
+    index = _team_index(history)
+    exact = {c: {} for c in index}
+    for c, names in index.items():
+        for n, tid in names.items():
+            exact[c].setdefault(norm(n), set()).add(tid)
+    by_league = {}
+    for r in history.get('m', []):
+        for tid in (r[4], r[5]):
+            n = (teams.get(tid) or {}).get('name')
+            if n:
+                names = by_league.setdefault(r[2], {})
+                if n not in names or (tid > 0 and names[n] < 0):
+                    names[n] = tid
+    matchers = {}
+
+    def league_id(key):
+        div = fcharts.DIVISION.get(key)
+        if div:
+            return DIV_LEAGUE.get(div) or synthetic_id('league|' + div)
+        return synthetic_id('league|fc-' + key)
+
+    def team_id(key, name, country):
+        """(GOAL20 team id, True when it is a team GOAL20 already knew)."""
+        k = f'{key}|{name}'
+        if k in state.fc_teams:
+            return state.fc_teams[k], True
+        tid = None
+        if not is_youth(name):
+            lid = league_id(key)
+            if key in fcharts.DIVISION and by_league.get(lid):
+                if lid not in matchers:
+                    matchers[lid] = Matcher({country: set(by_league[lid])})
+                hit = matchers[lid].match(name, country)
+                if hit:
+                    tid = by_league[lid][hit[0].split('|', 1)[1]]
+            if tid is None:
+                ids = (exact.get(country) or {}).get(norm(name)) or set()
+                if len(ids) == 1:
+                    tid = next(iter(ids))
+        if tid is not None:
+            state.fc_teams[k] = tid
+            return tid, True
+        return synthetic_id(f'fc-team|{country}|{name}'), False
+
+    def side(tid, name):
+        known = teams.get(tid) or {}
+        if tid not in teams:
+            teams[tid] = {'id': tid, 'name': name, 'logo': ''}
+            history['t'].append(teams[tid])
+        return {'id': tid, 'name': known.get('name') or name, 'logo': known.get('logo') or ''}
+
+    def league_json(key, season):
+        lid = league_id(key)
+        info = leagues[key]
+        if lid not in lgs:
+            lgs[lid] = {'id': lid, 'name': info['name'], 'country': info['country'],
+                        'logo': '', 'flag': '', 'season': season}
+            history['l'].append(lgs[lid])
+        return dict(lgs[lid], season=season)
+
+    def match_id(key, ts, home, away):
+        day = _dt.fromtimestamp(ts, _tz.utc).date().isoformat()
+        return synthetic_id(f'fc|{key}|{day}|{home}|{away}')
+
+    # 1. Results into the history (two seasons for new leagues).
+    cutoff = int(config.now_utc().timestamp()) - config.HISTORY_DAYS * 86400
+    known = {r[0] for r in history['m']}
+    pairs = {}
+    for r in history['m']:
+        pairs.setdefault((r[4], r[5]), []).append(r[1])
+    added = 0
+    recent = {}  # for filling in day files: (home id, away id) -> [(ts, hg, ag)]
+    window_start = int(config.now_utc().timestamp()) - 9 * 86400
+    for key, seasons in results.items():
+        country = leagues[key]['country']
+        for season, rows in seasons:
+            sy = fcharts.season_year(season)
+            for ts, h, a, hg, ag in rows:
+                if ts < cutoff:
+                    continue
+                (hid, hk), (aid, ak) = team_id(key, h, country), team_id(key, a, country)
+                if ts >= window_start:
+                    recent.setdefault((hid, aid), []).append((ts, hg, ag))
+                    recent.setdefault(f'{key}|{h}|{a}', []).append((ts, hg, ag))
+                # Leagues GOAL20 has from football-data.co.uk: only add a
+                # result when both clubs are recognised (never a double).
+                if key in fcharts.DIVISION and not (hk and ak):
+                    continue
+                mid = match_id(key, ts, h, a)
+                if mid in known or any(abs(t - ts) < 6 * 3600 for t in pairs.get((hid, aid), [])):
+                    continue
+                lg = league_json(key, sy)
+                side(hid, h)
+                side(aid, a)
+                history['m'].append([mid, ts, lg['id'], sy, hid, aid, hg, ag])
+                known.add(mid)
+                pairs.setdefault((hid, aid), []).append(ts)
+                added += 1
+
+    # 2. Next matches into the published days, and 3. finished scores.
+    today = config.today_cm()
+    keys = [config.day_key(today + timedelta(days=i)) for i in range(-7, 2)]
+    new_by_day = {k: [] for k in keys}
+    for key, rows in fixtures.items():
+        info = leagues[key]
+        sy = fcharts.season_year((info.get('seasons') or [''])[0])
+        for d, t, h, a, st in rows:
+            ts = fcharts.kickoff_ts(None, d, t or '12:00')
+            if ts is None:
+                continue
+            k = config.day_key(_dt.fromtimestamp(ts, config.CAMEROON).date())
+            if k not in new_by_day:
+                continue
+            (hid, _), (aid, _) = team_id(key, h, info['country']), team_id(key, a, info['country'])
+            code = fcharts.STATUS.get(st, 'NS')
+            new_by_day[k].append({
+                'id': match_id(key, ts, h, a), 'ts': ts, 'st': code,
+                'stl': {'NS': 'Not Started', 'PST': 'Postponed', 'CANC': 'Cancelled'}.get(code, code),
+                'el': None, 'lg': league_json(key, sy), 'rd': '', 'vn': '',
+                'h': side(hid, h), 'a': side(aid, a),
+                'hg': None, 'ag': None, 'fh': None, 'fa': None,
+                'src': 'fc', 'xk': f'{key}|{h}|{a}',
+            })
+
+    def result_for(f):
+        found = recent.get(f.get('xk')) if f.get('xk') else None
+        found = found or recent.get((f['h']['id'], f['a']['id'])) or []
+        best = [x for x in found if abs(x[0] - f['ts']) < 36 * 3600]
+        return min(best, key=lambda x: abs(x[0] - f['ts'])) if best else None
+
+    new_count, filled, changed_days = 0, 0, 0
+    for k in keys:
+        d = load_day(k)
+        found = new_by_day.get(k) or []
+        if d is None and not found:
+            continue
+        d = d or {'f': [], 'final': False}
+        current = {f['id']: f for f in d['f']}
+        changes = 0
+        for fx in found:
+            old = current.get(fx['id'])
+            if old is not None:
+                if old['st'] not in DONE_CODES and (old['ts'], old['st']) != (fx['ts'], fx['st']):
+                    old.update(ts=fx['ts'], st=fx['st'], stl=fx['stl'])
+                    changes += 1
+                continue
+            twin = None
+            for f in current.values():
+                if f.get('src') == 'fc':
+                    continue
+                gap = abs(f['ts'] - fx['ts'])
+                same_h, same_a = f['h']['id'] == fx['h']['id'], f['a']['id'] == fx['a']['id']
+                if (same_h and same_a and gap < 36 * 3600) or (
+                        (same_h or same_a) and f['lg']['id'] == fx['lg']['id'] and gap < 3 * 3600):
+                    twin = f
+                    break
+            if twin is not None:
+                continue
+            current[fx['id']] = fx
+            new_count += 1
+            changes += 1
+        for f in current.values():
+            if f['st'] in DONE_CODES or f['ts'] > int(config.now_utc().timestamp()):
+                continue
+            r = result_for(f)
+            if r is None:
+                continue
+            f.update({'st': 'FT', 'stl': 'Match Finished', 'el': None,
+                      'hg': r[1], 'ag': r[2], 'fh': r[1], 'fa': r[2]})
+            filled += 1
+            changes += 1
+        if changes:
+            fixtures_sorted = sorted(current.values(), key=lambda f: f['ts'])
+            save_day(k, fixtures_sorted, day_is_final(k, fixtures_sorted))
+            changed_days += 1
+    log(f'football-charts.com: {added} results added to the history, {new_count} upcoming matches added, '
+        f'{filled} scores filled in, {changed_days} day file(s) updated')
+    return added
+
+
 def add_finished_rows(history):
     """Adds finished matches from the published day files to the history."""
     known = {r[0] for r in history['m']}
@@ -669,12 +869,15 @@ def status_note(api, state):
         return ''
     head = ('API-Football account suspended: ' if state.is_suspended
             else 'No API-Football key: ')
+    parts = []
     if fdorg.available():
-        return (head + 'your GOAL20 server now uses football-data.org (12 top competitions, results the same day, '
-                'scores delayed, no live scores) and football-data.co.uk (more European leagues and odds; their '
-                'results arrive a few days late).')
-    return (head + 'your GOAL20 server now uses football-data.co.uk only (main European leagues; results arrive '
-            'a few days late; no live scores).')
+        parts.append('football-data.org (12 top competitions, results the same day, scores delayed)')
+    if fcharts.available():
+        parts.append('football-charts.com (about 80 more leagues incl. lower divisions, Africa and Asia; '
+                     'results the next morning)')
+    parts.append('football-data.co.uk (history and odds for European leagues; results a few days late)')
+    return head + 'your GOAL20 server now uses ' + ', '.join(parts) + '. No live scores.'
+
 
 
 def publish(history, enrich, keys, api, state, mode):
@@ -728,7 +931,9 @@ def publish(history, enrich, keys, api, state, mode):
         'api_suspended': state.is_suspended,
         'api_note': state.suspended_why if state.is_suspended else '',
         'sources': [x for x, on in (('api-football', api.available), ('football-data.org', not api.available and fdorg.available()),
+                                     ('football-charts.com', fcharts.available()),
                                      ('football-data.co.uk', True)) if on],
+        'attribution': [fcharts.ATTRIBUTION] if fcharts.available() else [],
         'status_note': status_note(api, state),
         'blocked': {k: state.blocked_why.get(k, '') for k in state.blocked},
         'notes': LOG[-40:],
@@ -739,7 +944,9 @@ def publish(history, enrich, keys, api, state, mode):
                 '<title>GOAL20 server</title><body style="font-family:sans-serif;background:#0a0f16;color:#e8eef5;padding:20px">'
                 f'<h2 style="color:#b8f23a">GOAL20 server is running</h2><p>Updated {manifest["generated"]} UTC · '
                 f'{len(history["m"])} results stored · {api.used} API requests this run.</p>'
-                '<p>Put this page\'s address in the GOAL20 app: Settings → GOAL20 server.</p><pre style="white-space:pre-wrap;color:#8a99ab">'
+                '<p>Put this page\'s address in the GOAL20 app: Settings → GOAL20 server.</p>'
+                + (f'<p>{fcharts.ATTRIBUTION} · football-data.org · football-data.co.uk</p>' if fcharts.available() else '')
+                + '<pre style="white-space:pre-wrap;color:#8a99ab">'
                 + '\n'.join(LOG[-40:]).replace('<', '&lt;') + '</pre></body>')
     open(os.path.join(config.SITE, '.nojekyll'), 'w').close()
     log(f'Published {len(published)} day files')
@@ -792,8 +999,11 @@ def main():
             fd_fallback_days(history, fd_matches, fd_upcoming, fd_to_api)
             if use_fdorg:
                 merge_fdorg(history, state, full=True)
-                add_finished_rows(history)
-            upcoming = [f for k in (keys['today'], keys['tomorrow']) for f in (load_day(k) or {}).get('f', [])]
+        # football-charts.com is read once a day, and only by full runs
+        # (quick runs do not save the data folder).
+        merge_fcharts(history, state, fetch_allowed=(mode == 'full'))
+        add_finished_rows(history)
+        upcoming = [f for k in (keys['today'], keys['tomorrow']) for f in (load_day(k) or {}).get('f', [])]
         enrich['fdodds'] = {}
         add_fd_odds(enrich, fd_upcoming, fd_to_api, upcoming)
     if mode == 'full' and api.available:

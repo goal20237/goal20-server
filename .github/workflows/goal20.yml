@@ -3,6 +3,7 @@ name: GOAL20 server
 on:
   schedule:
     - cron: '7 5 * * *'       # full run, 06:07 Cameroon time
+    - cron: '23 7 * * *'      # full run after football-charts.com's morning update, 08:23 Cameroon
     - cron: '41 7-22 * * *'   # hourly refresh (scores, statuses), 08:41-23:41 Cameroon
     - cron: '41 23,0,1 * * *' # late results (yesterday's matches), 00:41-02:41 Cameroon
   push:
@@ -35,8 +36,9 @@ jobs:
     env:
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
       FOOTBALL_DATA_ORG_KEY: ${{ secrets.FOOTBALL_DATA_ORG_KEY }}
+      FOOTBALL_CHARTS_KEY: ${{ secrets.FOOTBALL_CHARTS_KEY }}
       PLAN: ${{ vars.PLAN || 'free' }}
-      MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || ((github.event_name == 'push' || github.event.schedule == '7 5 * * *') && 'full' || 'quick') }}
+      MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || ((github.event_name == 'push' || github.event.schedule == '7 5 * * *' || github.event.schedule == '23 7 * * *') && 'full' || 'quick') }}
     steps:
       - uses: actions/checkout@v5
 
