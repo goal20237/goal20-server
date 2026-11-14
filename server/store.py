@@ -99,7 +99,7 @@ ENRICH_PATH = os.path.join(config.DATA, 'enrich.json.gz')
 
 def load_enrich():
     e = read_json(ENRICH_PATH, {}) or {}
-    for k in ('h2h', 'inj', 'lu', 'odds', 'fdodds'):
+    for k in ('h2h', 'inj', 'lu', 'odds', 'fdodds', 'opodds'):
         e.setdefault(k, {})
     return e
 

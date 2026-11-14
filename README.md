@@ -69,6 +69,9 @@ Free data sources (each optional, each its own secret; never share a key):
 - `FOOTBALL_CHARTS_KEY`: football-charts.com, about 80 more leagues (lower divisions, Africa, Asia),
   fixtures and results once a day. Free key: 200 requests a day for personal use; GOAL20 uses at
   most 185. Credit: "Data by football-charts.com". The cache is kept in `data/fc/`.
+- `ODDSPAPI_KEY`: OddsPapi, betPawa Cameroon's real prices. Free plan: 250 requests a month;
+  GOAL20 reads at most 7 a day (3 leagues each) for the busiest leagues and keeps 6 spare.
+  Where a betPawa price exists, it replaces other bookmakers' price for that market.
 
 ### 5. Turn on the website (GitHub Pages)
 **Settings → Pages → Build and deployment → Source: GitHub Actions**

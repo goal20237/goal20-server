@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from . import config, fdcouk, rank
 from . import fdorg
 from . import fcharts
+from . import oddspapi
 from .apifootball import Api, ApiError, hist_row, parse_odds, to_app_fixture
 from .names import Matcher, is_youth, norm
 from .net import fetch
@@ -839,6 +840,15 @@ def merged_enrich(enrich):
             out['odds'][key] = {'at': api['at'], 'v': api['v'] + entry['v']}
         else:
             out['odds'][key] = entry
+    # betPawa prices (OddsPapi) are the prices the user can really get: where
+    # one exists, it replaces the other bookmakers' price for that market.
+    for key, entry in enrich.get('opodds', {}).items():
+        cur = out['odds'].get(key)
+        own = {q['m'] for q in entry['v']}
+        if cur:
+            out['odds'][key] = {'at': entry['at'], 'v': [q for q in cur['v'] if q['m'] not in own] + entry['v']}
+        else:
+            out['odds'][key] = entry
     return out
 
 
@@ -876,6 +886,8 @@ def status_note(api, state):
         parts.append('football-charts.com (about 80 more leagues incl. lower divisions, Africa and Asia; '
                      'results the next morning)')
     parts.append('football-data.co.uk (history and odds for European leagues; results a few days late)')
+    if oddspapi.available():
+        parts.append('OddsPapi (real betPawa prices, read once a day for the busiest leagues)')
     return head + 'your GOAL20 server now uses ' + ', '.join(parts) + '. No live scores.'
 
 
@@ -932,6 +944,7 @@ def publish(history, enrich, keys, api, state, mode):
         'api_note': state.suspended_why if state.is_suspended else '',
         'sources': [x for x, on in (('api-football', api.available), ('football-data.org', not api.available and fdorg.available()),
                                      ('football-charts.com', fcharts.available()),
+                                     ('oddspapi.io (betPawa prices)', oddspapi.available()),
                                      ('football-data.co.uk', True)) if on],
         'attribution': [fcharts.ATTRIBUTION] if fcharts.available() else [],
         'status_note': status_note(api, state),
@@ -1006,6 +1019,11 @@ def main():
         upcoming = [f for k in (keys['today'], keys['tomorrow']) for f in (load_day(k) or {}).get('f', [])]
         enrich['fdodds'] = {}
         add_fd_odds(enrich, fd_upcoming, fd_to_api, upcoming)
+    if mode == 'full' and oddspapi.available():
+        try:
+            log('OddsPapi: ' + oddspapi.refresh(upcoming, enrich, log, stamp))
+        except Exception as e:  # a source problem must never stop the run
+            log(f'OddsPapi: {oddspapi._mask(e)}')
     if mode == 'full' and api.available:
         enrich_candidates(api, enrich, history, upcoming)
         state.last_full = config.now_utc().isoformat()
