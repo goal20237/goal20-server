@@ -877,6 +877,10 @@ def status_note(api, state):
     """Shown on the app's Home screen when data is limited ('' = nothing)."""
     if api.available:
         return ''
+    # API-Football was removed on purpose: no warning while the other
+    # sources are working. Only when nothing but the CSV files is left.
+    if fdorg.available() or fcharts.available():
+        return ''
     head = ('API-Football account suspended: ' if state.is_suspended
             else 'No API-Football key: ')
     parts = []
