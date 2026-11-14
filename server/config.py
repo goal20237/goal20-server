@@ -5,6 +5,36 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, 'data')
 DAYS = os.path.join(DATA, 'days')
 SITE = os.path.join(ROOT, 'site')
+CACHE = os.path.join(DATA, 'cache')
+
+
+def load_dotenv(path=None):
+    """Reads KEY=VALUE lines from the server folder's .env file (for runs on
+    your own PC). The file is listed in .gitignore, so it is never uploaded.
+    On GitHub, the keys come from Settings -> Secrets instead; a value that
+    is already set always wins over the file."""
+    path = path or os.path.join(ROOT, '.env')
+    try:
+        with open(path, encoding='utf-8-sig') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                name, value = line.split('=', 1)
+                name = name.strip().removeprefix('export ').strip()
+                value = value.strip().strip('"').strip("'")
+                if name and value and not os.environ.get(name):
+                    os.environ[name] = value
+    except FileNotFoundError:
+        pass
+    # One football-data.org key under either name.
+    key = os.environ.get('FOOTBALL_DATA_API_KEY') or os.environ.get('FOOTBALL_DATA_ORG_KEY') or ''
+    for name in ('FOOTBALL_DATA_API_KEY', 'FOOTBALL_DATA_ORG_KEY'):
+        if key and not os.environ.get(name):
+            os.environ[name] = key
+
+
+load_dotenv()
 
 API_KEY = os.environ.get('API_FOOTBALL_KEY', '').strip()
 PLAN = (os.environ.get('PLAN') or 'free').strip().lower()
@@ -21,7 +51,7 @@ HISTORY_DAYS = 450
 
 CAMEROON = timezone(timedelta(hours=1))
 API_TZ = 'Africa/Douala'
-VERSION = '1.6.2'
+VERSION = '1.8.0'
 
 
 def now_utc():

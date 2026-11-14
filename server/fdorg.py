@@ -14,7 +14,7 @@ from . import config
 from .net import fetch
 
 HOST = 'https://api.football-data.org/v4'
-KEY = os.environ.get('FOOTBALL_DATA_ORG_KEY', '').strip()
+KEY = (os.environ.get('FOOTBALL_DATA_API_KEY') or os.environ.get('FOOTBALL_DATA_ORG_KEY') or '').strip()
 
 # Competition code -> football-data.co.uk division (to share league ids with
 # the history) or a fixed API-Football league id for the cups.

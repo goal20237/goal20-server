@@ -2,3 +2,9 @@ site/
 __pycache__/
 *.pyc
 *.tmp
+
+# Secrets and the SQLite cache never go to GitHub
+.env
+.env.*
+!.env.example
+data/cache/

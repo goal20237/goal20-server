@@ -15,6 +15,10 @@ from . import config, fdcouk, rank
 from . import fdorg
 from . import fcharts
 from . import oddspapi
+from .cache import Cache
+from .data_fetcher import DataFetcher
+from .prediction_engine import PARAMS as PREDICTION_PARAMS, PredictionEngine
+from . import tickets
 from .apifootball import Api, ApiError, hist_row, parse_odds, to_app_fixture
 from .names import Matcher, is_youth, norm
 from .net import fetch
@@ -25,6 +29,7 @@ LOG = []
 
 
 
+PREDICTION_THRESHOLD = PREDICTION_PARAMS["threshold"]
 DONE_CODES = ('FT', 'AET', 'PEN', 'PST', 'CANC', 'ABD', 'AWD', 'WO')
 DIV_LEAGUE = {}
 
@@ -381,16 +386,15 @@ def _team_index(history):
     return index
 
 
-def merge_fdorg(history, state, full):
-    """Same-day fixtures and results for football-data.org's 12 competitions,
-    merged into the day files (existing matches are updated, never doubled)."""
+def merge_fdorg(history, state, fetcher):
+    """Fixtures and results for football-data.org's 12 competitions, merged
+    into the day files (existing matches are updated, never doubled). The
+    matches come from the dataFetcher: a real request at most every 6 hours
+    and 4 times a day, the SQLite cache otherwise."""
     from datetime import datetime as _dt
-    today_utc = config.now_utc().date()
-    start = today_utc - timedelta(days=7 if full else 2)
-    try:
-        raw = fdorg.matches(start, today_utc + timedelta(days=1), log)
-    except fdorg.FdOrgError as e:
-        log(f'football-data.org: {e}')
+    raw, note = fetcher.matches()
+    log(f'football-data.org: {note}')
+    if not raw:
         return 0
     teams = {t['id']: t for t in history.get('t', [])}
     leagues = {l['id']: l for l in history.get('l', [])}
@@ -896,7 +900,8 @@ def status_note(api, state):
 
 
 
-def publish(history, enrich, keys, api, state, mode):
+def publish(history, enrich, keys, api, state, mode, extra=None):
+    extra = extra or {}
     if os.path.isdir(config.SITE):
         shutil.rmtree(config.SITE)
     os.makedirs(os.path.join(config.SITE, 'days'))
@@ -935,6 +940,18 @@ def publish(history, enrich, keys, api, state, mode):
         write_json(os.path.join(config.SITE, 'days', f'{k}.json'), body)
         files['days'][k] = fingerprint(body['f'])
         published.append(k)
+    # Server-side predictions (yesterday, today, tomorrow): every phone reads
+    # these static files, so any number of users costs zero API requests.
+    predictions = extra.get('predictions') or {}
+    if predictions:
+        os.makedirs(os.path.join(config.SITE, 'predictions'))
+        files['predictions'] = {}
+        for k, body in predictions.items():
+            write_json(os.path.join(config.SITE, 'predictions', f'{k}.json'), body)
+            files['predictions'][k] = fingerprint({'p': body['p'], 't': body.get('tickets')})
+    if extra.get('standings'):
+        write_json(os.path.join(config.SITE, 'standings.json'), extra['standings'])
+        files['standings'] = fingerprint(extra['standings'])
     manifest = {
         'app': 'goal20', 'version': config.VERSION,
         'generated': config.now_utc().isoformat(), 'mode': mode,
@@ -952,6 +969,10 @@ def publish(history, enrich, keys, api, state, mode):
                                      ('football-data.co.uk', True)) if on],
         'attribution': [fcharts.ATTRIBUTION] if fcharts.available() else [],
         'status_note': status_note(api, state),
+        'fetch': extra.get('fetch') or {},
+        'tickets_record': extra.get('tickets_record') or {},
+        'model': {'name': 'Dixon-Coles + bivariate Poisson with venue form',
+                  'threshold': PREDICTION_THRESHOLD, 'skipped_status': 'SKIPPED_LOW_EDGE'},
         'blocked': {k: state.blocked_why.get(k, '') for k in state.blocked},
         'notes': LOG[-40:],
     }
@@ -971,9 +992,65 @@ def publish(history, enrich, keys, api, state, mode):
 
 # --------------------------------------------------------------------- main
 
+def make_predictions(history, cache):
+    """predictionEngine over yesterday, today and tomorrow (Cameroon days)."""
+    engine = PredictionEngine(history, cache, log)
+    out = {}
+    for i in (-1, 0, 1):
+        k = config.day_key(config.today_cm() + timedelta(days=i))
+        out[k] = engine.predict_day(k, (load_day(k) or {}).get('f', []))
+        out[k]['at'] = config.now_utc().isoformat()
+    picks = sum(v['summary']['picks'] for v in out.values())
+    total = sum(v['summary']['matches'] for v in out.values())
+    log(f'Predictions: {total} matches, {picks} picks at 70%+, {total - picks} SKIPPED_LOW_EDGE '
+        f'({engine.fitted} competitions rated, {engine.reused} ratings reused from the cache)')
+    return out
+
+
+def make_tickets(predictions, enrich, cache):
+    """Daily 3 Sure-Shot Picks and the 1000+ Odds Value Longshot for every
+    published day, frozen at their first kickoff, settled, archived in
+    data/tickets.json. Returns the record shown on the app's Track screen."""
+    odds = merged_enrich(enrich)['odds']
+    now = int(config.now_utc().timestamp())
+    archive = tickets.load_archive()
+    for k, body in predictions.items():
+        previous = None
+        if any(cache.get(f'ticket:{kind}:{k}') is None for kind in ('top3', 'longshot')):
+            previous = previous_site_file(f'predictions/{k}.json')
+        body['tickets'] = tickets.day_tickets(k, body['p'], odds, cache, now, previous)
+        archive[k] = body['tickets']
+    # Older days still waiting for a result: settle them from the day files.
+    for k in sorted(archive)[-10:]:
+        if k in predictions:
+            continue
+        fixtures = (load_day(k) or {}).get('f', [])
+        done = {}
+        for f in fixtures:
+            hg = f['fh'] if f.get('fh') is not None else f.get('hg')
+            ag = f['fa'] if f.get('fa') is not None else f.get('ag')
+            done[f['id']] = {'st': f.get('st'), 'result': [hg, ag] if f.get('st') in ('FT', 'AET', 'PEN')
+                             and hg is not None and ag is not None else None}
+        for t in (archive[k] or {}).values():
+            if t and t.get('result') == 'PENDING':
+                tickets.settle_ticket(t, done)
+    cache.commit()
+    tickets.save_archive(archive)
+    today = config.day_key(config.today_cm())
+    for k in (today,):
+        t = (predictions.get(k) or {}).get('tickets') or {}
+        top, lng = t.get('top3') or {}, t.get('longshot') or {}
+        log(f"Tickets {k}: Daily 3 {top.get('status')} (odds {top.get('odds')}), "
+            f"Longshot {lng.get('status')} ({len(lng.get('legs') or [])} legs, odds {lng.get('odds')})")
+    return tickets.record(archive)
+
+
 def main():
     mode = config.MODE if config.MODE in ('full', 'quick') else 'full'
     state = State()
+    cache = Cache()
+    fetcher = DataFetcher(cache, log)
+    fetcher.seed(previous_site_file('manifest.json'))
     budget = config.FULL_RUN_BUDGET if mode == 'full' else config.QUICK_RUN_BUDGET
     api = Api(state, budget)
     log(f'GOAL20 server {config.VERSION} · mode {mode} · plan {config.PLAN}')
@@ -1006,7 +1083,7 @@ def main():
         # Quick run: reuse the last full history and add the finished matches.
         history = previous
         if use_fdorg:
-            merge_fdorg(history, state, full=False)
+            merge_fdorg(history, state, fetcher)
         added = add_finished_rows(history)
         log(f'Quick run: reused published history ({len(history["m"])} results, {added} new)')
     else:
@@ -1015,7 +1092,7 @@ def main():
         if not api.available:
             fd_fallback_days(history, fd_matches, fd_upcoming, fd_to_api)
             if use_fdorg:
-                merge_fdorg(history, state, full=True)
+                merge_fdorg(history, state, fetcher)
         # football-charts.com is read once a day, and only by full runs
         # (quick runs do not save the data folder).
         merge_fcharts(history, state, fetch_allowed=(mode == 'full'))
@@ -1033,7 +1110,30 @@ def main():
         state.last_full = config.now_utc().isoformat()
     save_enrich(enrich)
     state.save()
-    publish(history, enrich, keys, api, state, mode)
+    standings = {}
+    if fdorg.available():
+        standings, note = fetcher.standings()
+        log(f'football-data.org standings: {note}')
+    try:
+        predictions = make_predictions(history, cache)
+    except Exception as e:  # never stop the site update
+        import traceback
+        log(f'Predictions failed: {e}')
+        traceback.print_exc()
+        predictions = {}
+    record = {}
+    if predictions:
+        try:
+            record = make_tickets(predictions, enrich, cache)
+        except Exception as e:  # never stop the site update
+            import traceback
+            log(f'Tickets failed: {e}')
+            traceback.print_exc()
+    publish(history, enrich, keys, api, state, mode,
+            {'predictions': predictions, 'standings': standings, 'fetch': fetcher.status(),
+             'tickets_record': record})
+    cache.prune()
+    cache.close()
     log(f'Done · {api.used} API request(s) used this run')
     return 0
 

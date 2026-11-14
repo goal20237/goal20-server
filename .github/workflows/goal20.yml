@@ -35,6 +35,9 @@ jobs:
     env:
       API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
       FOOTBALL_DATA_ORG_KEY: ${{ secrets.FOOTBALL_DATA_ORG_KEY }}
+      FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY || secrets.FOOTBALL_DATA_ORG_KEY }}
+      FETCH_EVERY_HOURS: '6'
+      MAX_CYCLES_PER_DAY: '4'
       FOOTBALL_CHARTS_KEY: ${{ secrets.FOOTBALL_CHARTS_KEY }}
       ODDSPAPI_KEY: ${{ secrets.ODDSPAPI_KEY }}
       PLAN: ${{ vars.PLAN || 'free' }}
@@ -46,8 +49,25 @@ jobs:
         with:
           python-version: '3.12'
 
+      # The SQLite cache (fixtures, ratings, frozen predictions, how many
+      # fetch cycles were used today) is kept between runs here, never in
+      # the public repository.
+      - name: Restore the SQLite cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/cache
+          key: goal20-cache-${{ github.run_id }}
+          restore-keys: goal20-cache-
+
       - name: Run GOAL20 server
         run: python -m server.main
+
+      - name: Keep the SQLite cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/cache
+          key: goal20-cache-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save collected data
         if: env.MODE == 'full'

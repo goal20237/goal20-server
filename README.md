@@ -100,15 +100,54 @@ From then on, the app syncs every time it opens.
 - **You want to see what happened:** open the last run in the Actions tab, or the status page. The last 40 log lines are on both.
 - **GitHub schedules start late:** they can run 5–30 minutes after the set time. That's normal.
 
+## Anti-ban cache, predictions and tickets (server 1.7-1.8)
+
+- **Phones never call a football API.** Every phone only downloads the static
+  files this server publishes on GitHub Pages, so 1 user or 10,000 users cost
+  the same: zero extra API requests.
+- **football-data.org at most every 6 hours, 4 times a day.** `server/data_fetcher.py`
+  is the only code that calls it. Between fetch cycles every run is served from
+  the SQLite cache `data/cache/goal20.sqlite` (kept between GitHub runs with
+  actions/cache, never committed). Standings: once a day.
+- **Predictions.** `server/prediction_engine.py` (Dixon-Coles + bivariate Poisson
+  with home/away form) writes `predictions/<day>.json` for yesterday, today and
+  tomorrow: each match is `PICK` (the single safest of 12 markets at 70%+) or
+  `SKIPPED_LOW_EDGE`, with 3 plain-language bullets. A prediction is frozen at
+  kickoff.
+- **Daily tickets (server 1.8).** `server/tickets.py` adds two tickets to each
+  predictions file: **Daily 3 Sure-Shot Picks** (1X, X2, Over 1.5 or draw no
+  bet at 78%+, one leg per match, fair odds 1.20-1.55 preferred) and the
+  **1000+ Odds Value Longshot** (1X2, BTTS & Over 2.5, team Over 1.5 with a
+  real price, legs strictly by value = probability x price - 1, up to 14
+  legs). Both are frozen at their first kickoff, settled, and archived in
+  `data/tickets.json`; the manifest's `tickets_record` holds the results.
+
+### Where the keys go
+
+- **On GitHub (the live server):** Settings → Secrets and variables → Actions.
+  `FOOTBALL_DATA_ORG_KEY` is read as `FOOTBALL_DATA_API_KEY` automatically;
+  you can also add a secret named `FOOTBALL_DATA_API_KEY` (it then wins).
+- **On your PC (only for a local test run):** copy `.env.example` to a file
+  named exactly `.env` in this folder and paste the key after
+  `FOOTBALL_DATA_API_KEY=`. `.env` is in `.gitignore`: git never uploads it.
+  Then run `python -m server.main`.
+
 ## Data sources
 
 - **API-Football:** worldwide fixtures, results, live scores, injuries, odds. Free plan: 100 requests/day; it can't read current seasons directly, which is why football-data.co.uk is added.
+- **football-data.org:** fixtures, results and standings of 12 top competitions (free plan, 10 requests/minute; GOAL20 uses about 4 a day plus 12 for standings).
+- **football-charts.com:** about 80 more leagues, read once a day.
+- **OddsPapi:** betPawa prices, about 7 requests a day.
 - **football-data.co.uk:** free CSV results for 22 European divisions plus 16 other countries (Brazil, Argentina, USA, Japan…), with Over/Under 2.5 prices for the main European divisions. Downloaded once a day.
 
 ## Files
 
 ```
 server/main.py        the run (full / quick)
+server/data_fetcher.py football-data.org fetcher: 6-hour, 4-a-day anti-ban gate
+server/cache.py       SQLite cache (responses, cycles, ratings, frozen predictions)
+server/prediction_engine.py Dixon-Coles + bivariate Poisson, 70% filter, bullets
+server/tickets.py     Daily 3 Sure-Shot Picks and the 1000+ Odds Value Longshot
 server/apifootball.py API-Football client: quota guard, plan-limit detection
 server/fdcouk.py      football-data.co.uk results and odds
 server/names.py       team-name matching between the two sources

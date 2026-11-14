@@ -209,8 +209,12 @@ class Client:
         return found.get('limit', MONTH_LIMIT), found.get('count', self.meta.get('month_n', 0))
 
 
+MARKETS_VERSION = 2  # 2 = draw, team totals and BTTS & Over 2.5 added (server 1.8)
+
+
 def _markets_map(rows):
     """OddsPapi outcome id -> GOAL20 market key (football, full time)."""
+    import re
     out = {}
     lines = {0.5: 'over05', 1.5: 'over15', 2.5: 'over25'}
     for m in rows if isinstance(rows, list) else []:
@@ -225,9 +229,27 @@ def _markets_map(rows):
             line = float(m.get('handicap') or 0)
         except (TypeError, ValueError):
             continue
+        side = 'home' if re.search(r'\bhome\b', name) else ('away' if re.search(r'\baway\b', name) else None)
+        team_market = side is not None or ('team' in name and 'both teams' not in name)
         if mtype == '1x2' and 'result' in name and '1' in outs and '2' in outs:
             out.setdefault(outs['1'], 'home')
             out.setdefault(outs['2'], 'away')
+            draw = outs.get('x') or outs.get('draw')
+            if draw:
+                out.setdefault(draw, 'draw')
+        elif mtype == 'totals' and team_market:
+            # A team's own goals: never mixed with the match total.
+            if side and 'over' in outs and line == 1.5 and not any(
+                    w in name for w in ('half', 'corner', 'card', 'asian')):
+                out.setdefault(outs['over'], f'{side}_o15')
+        elif 'both teams to score' in name and 'half' not in name and (
+                'over' in name or 'total' in name or '2.5' in name):
+            # Combined market: both teams score AND over 2.5 goals.
+            if '2.5' in name or line == 2.5:
+                for oname, oid in outs.items():
+                    if oname == 'yes' or ('yes' in oname and 'over' in oname):
+                        out.setdefault(oid, 'btts_o25')
+                        break
         elif mtype == 'totals' and 'over' in outs and line in lines and 'asian' not in name and 'corner' not in name \
                 and 'card' not in name and ('over under' in name or 'total' in name):
             out.setdefault(outs['over'], lines[line])
@@ -320,10 +342,11 @@ def refresh(fixtures, enrich, log, stamp):
         return f'monthly requests used ({used}/{limit}); prices again next month'
     day = now.date()
     try:
-        if not meta.get('markets') or (meta.get('markets_at') or '') < day.replace(day=1).isoformat():
+        if not meta.get('markets') or (meta.get('markets_at') or '') < day.replace(day=1).isoformat() \
+                or meta.get('markets_v') != MARKETS_VERSION:
             mk = _markets_map(client._get('markets', {'language': 'en'}))
             if mk:
-                meta['markets'], meta['markets_at'] = mk, day.isoformat()
+                meta['markets'], meta['markets_at'], meta['markets_v'] = mk, day.isoformat(), MARKETS_VERSION
             left -= 1
         if not meta.get('tournaments') or (meta.get('tournaments_at') or '') < (day - timedelta(days=7)).isoformat():
             rows = client._get('tournaments', {'sportId': SOCCER, 'language': 'en'})

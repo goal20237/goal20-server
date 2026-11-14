@@ -153,7 +153,7 @@ def load(log):
                 if o:
                     prices[book] = o
             wins = {}
-            for side, col_h in (('home', 'H'), ('away', 'A')):
+            for side, col_h in (('home', 'H'), ('draw', 'D'), ('away', 'A')):
                 for prefix, book in (('B365', 'Bet365'), ('PS', 'Pinnacle'), ('Avg', 'Market average')):
                     o = _odd(r.get(prefix + col_h))
                     if o:
