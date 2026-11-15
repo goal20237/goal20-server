@@ -22,12 +22,16 @@ generate_high_odds_accumulator(target_odds=1000)  "1000+ Odds Value Longshot"
     (model probability x price - 1), then estimated legs at the model's fair
     odds if needed, until the combined price reaches the target (max 14).
 
-Both tickets are rebuilt at every run until their first leg kicks off, then
-frozen, and settled from the results like the predictions. GOAL20 never
-places bets.
+Both tickets are previews until the morning update of their own day: the
+first full run from 08:00 Cameroon time (after football-charts.com's
+results) LOCKS them, or any run from 11:00, or their first kickoff, whichever
+comes first (server 1.12). A locked ticket never changes again. A leg whose
+match still has no result 48 hours after kickoff (postponed, moved or never
+reported) is void. GOAL20 never places bets.
 """
 import json
 import os
+from datetime import datetime
 
 from . import config
 from .prediction_engine import settle_leg
@@ -70,6 +74,9 @@ LONGSHOT = {
 PRICE_KEY = {'1': 'home', 'X': 'draw', '2': 'away', 'O1.5': 'over15',
              'BTTS_O2.5': 'btts_o25', 'H_O1.5': 'home_o15', 'A_O1.5': 'away_o15'}
 VOID_STATUSES = ('PST', 'CANC', 'ABD', 'AWD', 'WO')
+LOCK_HOUR_FULL = 8      # the first full run from 08:00 Cameroon time on the card's day locks it
+LOCK_HOUR_ANY = 11      # any run from 11:00 locks it (if the morning full run was late or failed)
+NO_RESULT_HOURS = 48    # a leg with no result this long after kickoff is void
 ARCHIVE = os.path.join(config.DATA, 'tickets.json')
 KEEP_DAYS = 180
 
@@ -367,17 +374,22 @@ def _totals(ticket):
 
 # ----------------------------------------------------- freeze and settle
 
-def settle_ticket(ticket, preds_by_id):
-    """Leg statuses from the results, then the ticket's result."""
+def settle_ticket(ticket, preds_by_id, now=None):
+    """Leg statuses from the results, then the ticket's result. With [now],
+    a leg still without a result 48 hours after kickoff is void."""
     for leg in ticket.get('legs') or []:
         p = preds_by_id.get(leg['id'])
         res = (p or {}).get('result')
+        leg.pop('void_reason', None)
         if res and len(res) == 2:
             won = settle_leg(leg['market'], res[0], res[1])
             leg['status'] = 'void' if won is None else ('won' if won else 'lost')
             leg['score'] = res
         elif (p or {}).get('st') in VOID_STATUSES:
             leg['status'] = 'void'
+        elif now is not None and leg.get('ts') and now - leg['ts'] > NO_RESULT_HOURS * 3600:
+            leg['status'] = 'void'
+            leg['void_reason'] = f'no result {NO_RESULT_HOURS} h after kickoff (postponed, moved or never reported)'
         else:
             leg['status'] = 'pending'
     legs = ticket.get('legs') or []
@@ -395,29 +407,67 @@ def settle_ticket(ticket, preds_by_id):
     return ticket
 
 
-def day_tickets(day_key, preds, odds, cache, now, previous=None):
-    """Both tickets for one day. A ticket whose first leg has kicked off is
-    frozen: taken from the SQLite cache (or, if the cache was lost, from the
-    last published file) instead of being rebuilt."""
+def lock_due(day_key, now, full):
+    """True when a card of [day_key] must lock at a run at [now]: a past day,
+    or its own day after the morning update (the first full run from 08:00
+    Cameroon time, or any run from 11:00)."""
+    local = datetime.fromtimestamp(now, config.CAMEROON)
+    today = config.day_key(local.date())
+    if day_key < today:
+        return True
+    if day_key > today:
+        return False
+    return (full and local.hour >= LOCK_HOUR_FULL) or local.hour >= LOCK_HOUR_ANY
+
+
+def lock_note(ticket, now):
+    """One line for the app: preview or locked."""
+    if ticket.get('locked'):
+        at = ticket.get('locked_at')
+        when = datetime.fromtimestamp(at, config.CAMEROON).strftime('%H:%M') if at else ''
+        why = 'at its first kickoff' if ticket.get('locked_by') == 'kickoff' else 'after the morning update'
+        return f'Locked {when} {why}: this card will not change any more.'.replace('  ', ' ')
+    today = config.day_key(datetime.fromtimestamp(now, config.CAMEROON).date())
+    if (ticket.get('day') or today) > today:
+        return ('Preview for tomorrow: the final card locks tomorrow morning after the update '
+                '(about 08:30-09:30) or at its first kickoff. Do not bet the preview.')
+    return ('Preview: the final card locks after the morning update (about 08:30-09:30) '
+            'or at its first kickoff, whichever comes first. Do not bet the preview.')
+
+
+def day_tickets(day_key, preds, odds, cache, now, previous=None, full=True):
+    """Both tickets for one day. Until the lock they are rebuilt at every
+    run (a preview); a locked ticket is taken from the SQLite cache (or, if
+    the cache was lost, from the last published file) and never rebuilt.
+    It locks after the morning update of its own day or at its first
+    kickoff, whichever comes first."""
     by_id = {p['id']: p for p in preds}
+    due = lock_due(day_key, now, full)
     out = {}
     for kind in ('top3', 'longshot'):
         key = f'ticket:{kind}:{day_key}'
         hit = cache.get(key) if cache is not None else None
         stored = hit[1] if hit else ((previous or {}).get('tickets') or {}).get(kind)
         first = (stored or {}).get('first_kickoff')
-        if stored and stored.get('legs') and first is not None and first <= now:
+        kicked = bool(stored and stored.get('legs') and first is not None and first <= now)
+        if stored and stored.get('legs') and (kicked or stored.get('locked')):
             ticket = json.loads(json.dumps(stored))
-            ticket['frozen'] = True
-            if cache is not None and not hit:
-                cache.put(key, 'tickets', stored, now)
+            ticket['frozen'] = kicked
+            if not ticket.get('locked'):
+                ticket.update(locked=True, locked_at=first, locked_by='kickoff')
+            if cache is not None and (not hit or hit[1].get('locked') != ticket['locked']):
+                cache.put(key, 'tickets', ticket, now)
         else:
             ticket = (generate_daily_top3(preds, now, day_key) if kind == 'top3'
                       else generate_high_odds_accumulator(preds, odds, now, day_key))
             ticket['frozen'] = False
+            ticket['locked'] = bool(due and ticket.get('legs'))
+            if ticket['locked']:
+                ticket.update(locked_at=now, locked_by='morning')
             if cache is not None:
                 cache.put(key, 'tickets', ticket, now)
-        out[kind] = settle_ticket(ticket, by_id)
+        ticket['lock_note'] = lock_note(ticket, now)
+        out[kind] = settle_ticket(ticket, by_id, now)
     return out
 
 

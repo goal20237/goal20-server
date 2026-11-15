@@ -717,6 +717,11 @@ def merge_espn(history, state, full):
         log('ESPN: ' + espn.refresh(full, log))
     except Exception as e:  # a source problem must never stop the run
         log(f'ESPN: {e}')
+    try:
+        # Server 1.12: the combined list misses many leagues; read them one by one.
+        log('ESPN leagues: ' + espn.refresh_leagues(full, log))
+    except Exception as e:  # a source problem must never stop the run
+        log(f'ESPN leagues: {e}')
     days = espn.cached_days()
     if not days:
         return []
@@ -1209,9 +1214,9 @@ def make_predictions(history, cache, intl_rows=()):
     return out
 
 
-def make_tickets(predictions, enrich, cache):
+def make_tickets(predictions, enrich, cache, full=True):
     """Daily Top 3 Statistical Picks (graded A/B/C) and the 1000+ Odds Value Longshot for every
-    published day, frozen at their first kickoff, settled, archived in
+    published day, locked after the morning update (or at their first kickoff), settled, archived in
     data/tickets.json. Returns the record shown on the app's Track screen."""
     odds = merged_enrich(enrich)['odds']
     now = int(config.now_utc().timestamp())
@@ -1220,7 +1225,7 @@ def make_tickets(predictions, enrich, cache):
         previous = None
         if any(cache.get(f'ticket:{kind}:{k}') is None for kind in ('top3', 'longshot')):
             previous = previous_site_file(f'predictions/{k}.json')
-        body['tickets'] = tickets.day_tickets(k, body['p'], odds, cache, now, previous)
+        body['tickets'] = tickets.day_tickets(k, body['p'], odds, cache, now, previous, full)
         archive[k] = body['tickets']
     # Older days still waiting for a result: settle them from the day files.
     for k in sorted(archive)[-10:]:
@@ -1235,7 +1240,7 @@ def make_tickets(predictions, enrich, cache):
                              and hg is not None and ag is not None else None}
         for t in (archive[k] or {}).values():
             if t and t.get('result') == 'PENDING':
-                tickets.settle_ticket(t, done)
+                tickets.settle_ticket(t, done, now)
     cache.commit()
     tickets.save_archive(archive)
     today = config.day_key(config.today_cm())
@@ -1244,7 +1249,8 @@ def make_tickets(predictions, enrich, cache):
         top, lng = t.get('top3') or {}, t.get('longshot') or {}
         log(f"Tickets {k}: Daily Top 3 {top.get('status')} grade {top.get('grade') or '-'} "
             f"({len(top.get('legs') or [])} legs, odds {top.get('odds')}), "
-            f"Longshot {lng.get('status')} ({len(lng.get('legs') or [])} legs, odds {lng.get('odds')})")
+            f"Longshot {lng.get('status')} ({len(lng.get('legs') or [])} legs, odds {lng.get('odds')}), "
+            f"{'locked' if top.get('locked') else 'preview'}")
     return tickets.record(archive)
 
 
@@ -1335,7 +1341,7 @@ def main():
     record = {}
     if predictions:
         try:
-            record = make_tickets(predictions, enrich, cache)
+            record = make_tickets(predictions, enrich, cache, full=(mode == 'full'))
         except Exception as e:  # never stop the site update
             import traceback
             log(f'Tickets failed: {e}')

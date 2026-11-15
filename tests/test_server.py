@@ -92,10 +92,27 @@ def main():
 
     def fake_fetch(url, headers=None, timeout=40, retries=2):
         calls.append(url)
+        if 'site.api.espn.com' in url and '/scoreboard' in url:
+            # One league's scoreboard (server 1.12): its events of that date and its calendar.
+            slug = url.split('/soccer/')[1].split('/')[0]
+            espn_world.setdefault('league_calls', []).append((slug, url.split('dates=')[1][:8]))
+            if slug in espn_world.get('bad', ()):
+                return 400, {}, b'{"code":400}'
+            day = url.split('dates=')[1][:8]
+            mine = [(lid, lname, ev) for sl, lid, lname, ev in espn_world.get('events', []) if sl == slug]
+            cal = sorted({ev['date'][:10] + 'T08:00Z' for _, _, ev in mine})
+            lid, lname = (mine[0][0], mine[0][1]) if mine else ('1', slug)
+            league = {'id': lid, 'slug': slug, 'name': lname}
+            if slug not in espn_world.get('no_calendar', ()):
+                league['calendar'] = cal
+            return 200, {}, json.dumps({'leagues': [league], 'events': [
+                ev for _, _, ev in mine if ev['date'][:10].replace('-', '') == day]}).encode()
         if 'site.api.espn.com' in url:
             day = url.split('dates=')[1][:8]
             groups = {}
             for slug, lid, lname, ev in espn_world.get('events', []):
+                if slug in espn_world.get('hidden', ()):
+                    continue  # ESPN's combined list leaves some leagues out
                 if ev['date'][:10].replace('-', '') == day:
                     groups.setdefault(slug, {'leagues': [{'id': lid, 'slug': slug, 'name': lname}],
                                              'events': []})['events'].append(ev)
@@ -185,6 +202,8 @@ def main():
     server.espn.fetch = fake_fetch
     server.internationals.fetch = fake_fetch
     server.espn.PAUSE = 0
+    server.espn.PAUSE_LEAGUE = 0
+    server.espn.LEAGUES = ['eng.4', 'per.1', 'xyz.9']  # a few, so the fake world stays small
     server.espn.ENABLED = False  # switched on in the ESPN scenario below
     import types
     import time as _time
@@ -980,6 +999,52 @@ def ticket_checks(tmp):
     fresh = server.cache.Cache(os.path.join(tmp, 'tickets-lost.sqlite'))
     again = tk.day_tickets('2030-03-18', changed, odds, fresh, first + 60, previous=published)
     assert again['top3']['frozen'] and [l['id'] for l in again['top3']['legs']] == [5, 2, 1]
+    assert again['top3']['locked'] and again['top3']['locked_by'] == 'kickoff'
+
+    # ---- Morning lock (server 1.12): a preview until the morning update of its own day.
+    import datetime as _dtm
+    cm = _dtm.timezone(_dtm.timedelta(hours=1))
+
+    def at(day, h, m=0):
+        return int(_dtm.datetime(2030, 3, day, h, m, tzinfo=cm).timestamp())
+    assert not tk.lock_due('2030-03-20', at(20, 7), True), 'before 08:00'
+    assert not tk.lock_due('2030-03-20', at(20, 9, 41), False), 'quick run before 11:00'
+    assert tk.lock_due('2030-03-20', at(20, 8, 30), True), 'the morning full run'
+    assert tk.lock_due('2030-03-20', at(20, 11, 41), False), 'any run from 11:00'
+    assert not tk.lock_due('2030-03-21', at(20, 23), True), 'tomorrow stays a preview'
+    assert tk.lock_due('2030-03-19', at(20, 1), False), 'a past day'
+    day_preds = [pred(200 + i, {'1X': 0.80 + 0.01 * i, '2': 0.2 - 0.01 * i}, ts=at(20, 15) + 600 * i) for i in range(4)]
+    lc = server.cache.Cache(os.path.join(tmp, 'tickets-lock.sqlite'))
+    pv = tk.day_tickets('2030-03-20', day_preds, odds, lc, at(20, 7), full=True)
+    assert not pv['top3']['locked'] and pv['top3']['lock_note'].startswith('Preview:'), pv['top3'].get('lock_note')
+    lk = tk.day_tickets('2030-03-20', day_preds, odds, lc, at(20, 8, 40), full=True)
+    assert lk['top3']['locked'] and lk['top3']['locked_by'] == 'morning' and not lk['top3']['frozen']
+    assert lk['top3']['lock_note'].startswith('Locked 08:40 after the morning update'), lk['top3']['lock_note']
+    ids = [l['id'] for l in lk['top3']['legs']]
+    shuffled = ([dict(p_, probs={'1X': 0.66, '2': 0.34}) for p_ in day_preds[:3]] + day_preds[3:]
+                + [pred(210, {'1X': 0.83, '2': 0.17}, ts=at(20, 16))])
+    kept = tk.day_tickets('2030-03-20', shuffled, odds, lc, at(20, 10, 41), full=False)
+    assert [l['id'] for l in kept['top3']['legs']] == ids, 'a locked card never changes'
+    assert kept['top3']['locked'] and not kept['top3']['frozen']
+    nxt = tk.day_tickets('2030-03-21', [dict(p_, ts=p_['ts'] + 86400) for p_ in day_preds], odds, lc, at(20, 20),
+                         full=True)
+    assert not nxt['top3']['locked'] and nxt['top3']['lock_note'].startswith('Preview for tomorrow')
+    early_day = [pred(220 + i, {'1X': 0.81, '2': 0.19}, ts=at(22, 7, 30) + 600 * i) for i in range(3)]
+    tk.day_tickets('2030-03-22', early_day, odds, lc, at(22, 7), full=False)
+    ko = tk.day_tickets('2030-03-22', early_day, odds, lc, at(22, 7, 41), full=False)
+    assert ko['top3']['locked'] and ko['top3']['locked_by'] == 'kickoff' and ko['top3']['frozen']
+    assert ko['top3']['lock_note'].startswith('Locked 07:30 at its first kickoff'), ko['top3']['lock_note']
+
+    # ---- No result 48 hours after kickoff: the leg is void (server 1.12).
+    last = next(l['ts'] for l in t['legs'] if l['id'] == 1)  # the leg without a result
+    part = {5: {'result': [2, 0]}, 2: {'result': [0, 2]}}
+    waiting = tk.settle_ticket(json.loads(json.dumps(t)), part, last + 47 * 3600)
+    assert waiting['result'] == 'PENDING' and waiting['legs'][2]['status'] == 'pending'
+    gone = tk.settle_ticket(json.loads(json.dumps(t)), part, last + 49 * 3600)
+    assert [l['status'] for l in gone['legs']] == ['won', 'won', 'void'] and gone['result'] == 'WON', gone['legs']
+    assert 'no result 48 h after kickoff' in gone['legs'][2]['void_reason']
+    assert abs(gone['paid_odds'] - round(1 / 0.83 * 1 / 0.82, 2)) < 0.02, gone['paid_odds']
+    assert tk.settle_ticket(json.loads(json.dumps(t)), {}, max(l['ts'] for l in t['legs']) + 49 * 3600)['result'] == 'VOID'
 
     # ---- Record for the Track screen.
     c_won = tk.settle_ticket(json.loads(json.dumps(only_c)), {160: {'result': [2, 1]}, 162: {'result': [0, 0]},
@@ -1092,6 +1157,13 @@ def espn_scenario(tmp, site, espn_world, intl_csv, server):
         events.append(('per.1', '670', 'Peruvian Liga 1',
                        ev(9020 + i, now - _td(days=2 + i), f'Club {i}', f'Club {i + 4}', state='post',
                           name='STATUS_FULL_TIME', hs=str(i % 3), as_='1', clock="90'+3'", period=2)))
+    # English League Two: missing from ESPN's combined list, read league by league.
+    events.append(('eng.4', '745', 'English League Two', ev(9030, kick, 'Walsall', 'Barnet')))
+    events.append(('eng.4', '745', 'English League Two', ev(9031, now - _td(minutes=30), 'Notts County', 'Gillingham',
+                                                         state='in', name='STATUS_FIRST_HALF', hs='0', as_='1',
+                                                         clock="29'", period=1)))
+    espn_world['hidden'] = {'eng.4'}
+    espn_world['bad'] = {'xyz.9'}
     espn_world['events'] = events
     espn_mod.ENABLED = True
     server.main.config.MODE = 'full'
@@ -1111,6 +1183,24 @@ def espn_scenario(tmp, site, espn_world, intl_csv, server):
     live = by_espn['9006']
     assert live['st'] == '2H' and live['el'] == 67 and live['hg'] == 1, live
     assert not any('Women' in f['h']['name'] for f in d['f']), "women's league should be left out"
+    # League by league (server 1.12): the hidden league is there, live, and the
+    # slug ESPN does not know is remembered and left alone.
+    assert '9030' in by_espn and by_espn['9030']['espn']['lg'] == 'eng.4', sorted(by_espn)
+    l2 = by_espn['9031']
+    assert l2['st'] == '1H' and l2['el'] == 29 and (l2['hg'], l2['ag']) == (0, 1), l2
+    meta = espn_mod.load_meta()
+    assert meta['xyz.9'].get('bad') and meta['eng.4'].get('cal') and meta['eng.4'].get('name') == 'English League Two', meta
+    assert 'league-days read league by league' in log and 'unknown to ESPN' in log
+    calls_before = len(espn_world['league_calls'])
+    espn_mod.refresh(False, print)  # a fresh combined list keeps the league-by-league events
+    kept = espn_mod.load_day(by_espn['9030']['espn']['d'])
+    assert any(e['id'] == '9030' for e in kept['events']) and 'eng.4' in kept['slugs'], kept.get('slugs')
+    espn_mod.refresh_leagues(False, print)  # quick: no 'xyz.9' (bad), only match days of eng.4
+    quick_calls = espn_world['league_calls'][calls_before:]
+    assert quick_calls and all(sl != 'xyz.9' for sl, _ in quick_calls), quick_calls
+    assert {sl for sl, _ in quick_calls} <= {'eng.4', 'per.1'}, quick_calls
+    for sl, d in quick_calls:  # quick runs: only match days from the calendar
+        assert d in espn_mod.load_meta()[sl].get('cal', []), (sl, d)
     u21 = by_espn['9011']
     assert not u21.get('pool') and u21['h']['id'] != intl_mod.team_id('Portugal'), 'U21 rated with seniors'
     hist = json.loads(gzip.open(os.path.join(site, 'history.json.gz')).read())

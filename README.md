@@ -125,6 +125,12 @@ From then on, the app syncs every time it opens.
   real price, legs strictly by value = probability x price - 1, up to 14
   legs). Both are frozen at their first kickoff, settled, and archived in
   `data/tickets.json`; the manifest's `tickets_record` holds the results:
+  Server 1.12: both tickets are previews until the morning update of their
+  day (first full run from 08:00 Cameroon, any run from 11:00, or the first
+  kickoff), then locked for good; a leg with no result 48 hours after
+  kickoff is void. ESPN is also read league by league (about 200
+  competitions, on their match days) because its combined list is
+  incomplete.
   `top3` = the Grade A record (headline), `top3_grades` = one record per
   card grade (never added together), `top3_legs` = every leg by its own
   grade against the model's expectation.
