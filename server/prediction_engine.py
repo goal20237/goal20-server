@@ -42,6 +42,9 @@ PARAMS = {
     'threshold': 0.70,
 }
 
+# National teams play about 10 matches a year: a longer memory.
+POOL_PARAMS = dict(PARAMS, half_life_days=365, train_days=1460)
+
 # The 12 markets, in tie-break order.
 MARKETS = ['1', 'X', '2', '1X', 'X2', '12', 'O1.5', 'U1.5', 'O2.5', 'U2.5', 'BTTS_YES', 'BTTS_NO']
 LABELS = {
@@ -83,13 +86,17 @@ def fit_league(rows, cutoff, prior, p=PARAMS):
     sw_ = p['shots_weight']
 
     slot = {}
-    hi, ai, gh, ga, yh, ya, w = [], [], [], [], [], [], []
+    hi, ai, gh, ga, yh, ya, w, nt = [], [], [], [], [], [], [], []
     for r in data:
         hi.append(slot.setdefault(r[4], len(slot)))
         ai.append(slot.setdefault(r[5], len(slot)))
         gh.append(r[6])
         ga.append(r[7])
-        w.append(math.exp(-xi * (cutoff - r[1]) / DAY))
+        # National-team rows carry a neutral-venue flag (14) and a weight (15:
+        # friendlies count half).
+        nt.append(1 if len(r) > 14 and r[14] else 0)
+        mult = r[15] if len(r) > 15 and r[15] else 1.0
+        w.append(math.exp(-xi * (cutoff - r[1]) / DAY) * mult)
         if _has_shots(r) and sw_ > 0:
             yh.append((1 - sw_) * r[6] + sw_ * r[10] * conv)
             ya.append((1 - sw_) * r[7] + sw_ * r[11] * conv)
@@ -104,26 +111,31 @@ def fit_league(rows, cutoff, prior, p=PARAMS):
     hl, al = 1.4, 1.1
     rng = range(n)
     for _ in range(p['iterations']):
+        mn = math.sqrt(hl * al)  # neutral venue: no home advantage
         num, den = [0.0] * t, [0.0] * t
         for i in rng:
             h, a, wi = hi[i], ai[i], w[i]
+            sh, sa = (mn, mn) if nt[i] else (hl, al)
             num[h] += wi * yh[i]
-            den[h] += wi * de[a] * hl
+            den[h] += wi * de[a] * sh
             num[a] += wi * ya[i]
-            den[a] += wi * de[h] * al
+            den[a] += wi * de[h] * sa
         att = [(num[j] + prior) / (den[j] + prior) for j in range(t)]
         num, den = [0.0] * t, [0.0] * t
         for i in rng:
             h, a, wi = hi[i], ai[i], w[i]
+            sh, sa = (mn, mn) if nt[i] else (hl, al)
             num[a] += wi * yh[i]
-            den[a] += wi * att[h] * hl
+            den[a] += wi * att[h] * sh
             num[h] += wi * ya[i]
-            den[h] += wi * att[a] * al
+            den[h] += wi * att[a] * sa
         de = [(num[j] + prior) / (den[j] + prior) for j in range(t)]
         gm = math.exp(sum(math.log(x) for x in att) / t)
         att = [x / gm for x in att]
         nh = dh = na = da = 0.0
         for i in rng:
+            if nt[i]:
+                continue
             h, a, wi = hi[i], ai[i], w[i]
             nh += wi * yh[i]
             dh += wi * att[h] * de[a]
@@ -134,7 +146,9 @@ def fit_league(rows, cutoff, prior, p=PARAMS):
         if da > 0:
             al = na / da
 
-    lam = [(att[hi[i]] * de[ai[i]] * hl, att[ai[i]] * de[hi[i]] * al) for i in rng]
+    mn = math.sqrt(hl * al)
+    lam = [(att[hi[i]] * de[ai[i]] * (mn if nt[i] else hl), att[ai[i]] * de[hi[i]] * (mn if nt[i] else al))
+           for i in rng]
     # Low-score correction rho: grid search on the real goals.
     rho, best = 0.0, -math.inf
     for step in range(36):
@@ -392,20 +406,28 @@ class PredictionEngine:
     Ratings are cached in SQLite (one fit per competition and day), and a
     prediction is frozen once its match kicks off."""
 
-    def __init__(self, history, cache=None, log=print, now=None):
+    def __init__(self, history, cache=None, log=print, now=None, pools=None, pool_rows=()):
+        """pools: {tag: pool league id} (e.g. {'intl': id}); a fixture with
+        fixture['pool'] == tag is rated in that pool, from pool_rows."""
         self.cache = cache
         self.log = log
         self.now = now if now is not None else int(datetime.now(timezone.utc).timestamp())
         self.leagues = {l['id']: l for l in history.get('l', [])}
+        self.pools = dict(pools or {})
         self.by_league = {}
-        for r in history.get('m', []):
+        for r in list(history.get('m', [])) + list(pool_rows):
             if len(r) >= 8 and r[6] is not None and r[7] is not None:
                 self.by_league.setdefault(r[2], []).append(r)
         for rows in self.by_league.values():
             rows.sort(key=lambda r: r[1])
         self._fits = {}
         self._venue = {}
-        self.fitted = self.reused = 0
+        self._by_team = None
+        self._global = None
+        self.fitted = self.reused = self.cold = 0
+
+    def params_for(self, league):
+        return POOL_PARAMS if league in self.pools.values() else PARAMS
 
     # ratings, cached in memory and in SQLite
     def _fit(self, league, cutoff, prior):
@@ -413,16 +435,17 @@ class PredictionEngine:
         if key in self._fits:
             return self._fits[key]
         rows = self.by_league.get(league) or []
-        oldest = cutoff - PARAMS['train_days'] * DAY
+        p = self.params_for(league)
+        oldest = cutoff - p['train_days'] * DAY
         count = sum(1 for r in rows if oldest <= r[1] < cutoff)
         fit = None
         tag = league * 1000 + prior  # one cache row per competition and prior
-        if self.cache is not None and count >= PARAMS['min_league_matches']:
+        if self.cache is not None and count >= p['min_league_matches']:
             fit = self.cache.get_fit(tag, cutoff, count)
             if fit is not None:
                 self.reused += 1
-        if fit is None and count >= PARAMS['min_league_matches']:
-            fit = fit_league(rows, cutoff, prior)
+        if fit is None and count >= p['min_league_matches']:
+            fit = fit_league(rows, cutoff, prior, p)
             self.fitted += 1
             if fit is not None and self.cache is not None:
                 self.cache.put_fit(tag, cutoff, count, fit)
@@ -441,87 +464,185 @@ class PredictionEngine:
         with its own result."""
         return min(self.now - self.now % DAY, ts - ts % DAY)
 
+    def _team_all(self, team):
+        """Every stored result of a team, in any competition, oldest first."""
+        if self._by_team is None:
+            self._by_team = {}
+            for rows in self.by_league.values():
+                for r in rows:
+                    self._by_team.setdefault(r[4], []).append(r)
+                    self._by_team.setdefault(r[5], []).append(r)
+            for rows in self._by_team.values():
+                rows.sort(key=lambda r: r[1])
+        return self._by_team.get(team) or []
+
+    def _baseline(self, league, cutoff, fit):
+        """(home goals, away goals, rho, lambda3, where from) for a cold start."""
+        if fit:
+            return fit['hl'], fit['al'], fit['rho'], fit['l3'], 'this competition'
+        oldest = cutoff - PARAMS['train_days'] * DAY
+        rows = [r for r in self.by_league.get(league) or [] if oldest <= r[1] < cutoff]
+        if len(rows) >= 10:
+            return (sum(r[6] for r in rows) / len(rows), sum(r[7] for r in rows) / len(rows),
+                    -0.05, 0.05, f'this competition ({len(rows)} results)')
+        if self._global is None:
+            hg = ag = n = 0
+            since = self.now - 365 * DAY
+            for lid, rows_ in self.by_league.items():
+                if lid in self.pools.values():
+                    continue
+                for r in rows_:
+                    if r[1] >= since:
+                        hg += r[6]
+                        ag += r[7]
+                        n += 1
+            self._global = (hg / n, ag / n) if n >= 200 else (1.45, 1.15)
+        return self._global[0], self._global[1], -0.05, 0.05, 'worldwide averages'
+
+    def _recent_form(self, team, cutoff, n=10):
+        gf = ga = 0
+        rows = [r for r in self._team_all(team) if r[1] < cutoff][-n:]
+        for r in rows:
+            if r[4] == team:
+                gf += r[6]
+                ga += r[7]
+            else:
+                gf += r[7]
+                ga += r[6]
+        return gf, ga, len(rows)
+
     def predict_match(self, fx):
         home, away = fx['h'].get('name') or 'Home', fx['a'].get('name') or 'Away'
         league = self.leagues.get(fx['lg']['id']) or fx['lg']
-        if 'friendl' in (league.get('name') or fx['lg'].get('name') or '').lower():
+        pool = self.pools.get(fx.get('pool'))
+        if pool is None and 'friendl' in (league.get('name') or fx['lg'].get('name') or '').lower():
             return _skip(fx, 'friendly', [
-                'Friendly match: line-ups and effort are unpredictable.',
-                'GOAL20 does not rate friendlies.',
+                'Club friendly: line-ups and effort are unpredictable.',
+                'GOAL20 does not rate club friendlies.',
                 'Status SKIPPED_LOW_EDGE: no bet.'])
         cutoff = self.cutoff_for(fx['ts'])
-        lg = fx['lg']['id']
+        lg = pool if pool is not None else fx['lg']['id']
         res = self._fit(lg, cutoff, PARAMS['prior_result'])
         gls = self._fit(lg, cutoff, PARAMS['prior_goals']) if res else None
         h, a = fx['h']['id'], fx['a']['id']
-        if not res or not gls:
-            n = len(self.by_league.get(lg) or [])
-            return _skip(fx, 'not_enough_data', [
-                f"{fx['lg'].get('name') or 'This competition'}: {n} stored results, "
-                f"GOAL20 needs {PARAMS['min_league_matches']} recent ones to rate it.",
-                'GOAL20 does not guess when the data is thin.',
-                'Status SKIPPED_LOW_EDGE: no bet.'])
+        neutral = bool(fx.get('neutral'))
+        if not res or not gls or not (Ratings(res).covers(h) and Ratings(res).covers(a)):
+            return self._cold_match(fx, lg, cutoff, res, neutral, pool is not None)
         R, G = Ratings(res), Ratings(gls)
-        if not (R.covers(h) and R.covers(a)):
-            thin = home if not R.covers(h) else away
-            return _skip(fx, 'not_enough_data', [
-                f'{thin} has too few recent games in this competition to be rated.',
-                'GOAL20 does not guess when the data is thin.',
-                'Status SKIPPED_LOW_EDGE: no bet.'])
 
-        conv = res['conv']
-        hv = venue_form(self._team_rows(lg, h), h, cutoff, 'home', conv)
-        av = venue_form(self._team_rows(lg, a), a, cutoff, 'away', conv)
-        k = PARAMS['venue_prior']
-        # What the full ratings expect from each side at this venue against
-        # an average opponent, and how the venue form compares with it.
-        e_hf, e_ha = R.att(h) * res['hl'], R.de(h) * res['al']
-        e_af, e_aa = R.att(a) * res['al'], R.de(a) * res['hl']
-        vhA, vhD = _shrunk(hv['gf'], hv['sw'], e_hf, k), _shrunk(hv['ga'], hv['sw'], e_ha, k)
-        vaA, vaD = _shrunk(av['gf'], av['sw'], e_af, k), _shrunk(av['ga'], av['sw'], e_aa, k)
+        if pool is None:
+            conv = res['conv']
+            hv = venue_form(self._team_rows(lg, h), h, cutoff, 'home', conv)
+            av = venue_form(self._team_rows(lg, a), a, cutoff, 'away', conv)
+            k = PARAMS['venue_prior']
+            # What the full ratings expect from each side at this venue
+            # against an average opponent, and how the venue form compares.
+            e_hf, e_ha = R.att(h) * res['hl'], R.de(h) * res['al']
+            e_af, e_aa = R.att(a) * res['al'], R.de(a) * res['hl']
+            vhA, vhD = _shrunk(hv['gf'], hv['sw'], e_hf, k), _shrunk(hv['ga'], hv['sw'], e_ha, k)
+            vaA, vaD = _shrunk(av['gf'], av['sw'], e_af, k), _shrunk(av['ga'], av['sw'], e_aa, k)
+            form = {
+                'home': {'n': hv['n'], 'for': round(hv['gf'] / hv['sw'], 2) if hv['sw'] else 0.0,
+                         'against': round(hv['ga'] / hv['sw'], 2) if hv['sw'] else 0.0},
+                'away': {'n': av['n'], 'for': round(av['gf'] / av['sw'], 2) if av['sw'] else 0.0,
+                         'against': round(av['ga'] / av['sw'], 2) if av['sw'] else 0.0},
+            }
+        else:
+            # National teams: few home games a year, many neutral venues -
+            # the full ratings only, form shown over the last 10 matches.
+            vhA = vhD = vaA = vaD = 1.0
+            fh_, ah_, nh_ = self._recent_form(h, cutoff)
+            fa_, aa_, na_ = self._recent_form(a, cutoff)
+            form = {'home': {'n': nh_, 'for': round(fh_ / nh_, 2) if nh_ else 0.0,
+                             'against': round(ah_ / nh_, 2) if nh_ else 0.0},
+                    'away': {'n': na_, 'for': round(fa_ / na_, 2) if na_ else 0.0,
+                             'against': round(aa_ / na_, 2) if na_ else 0.0},
+                    'any_venue': True}
         adj_h, adj_a = math.sqrt(vhA * vaD), math.sqrt(vaA * vhD)
 
         def lambdas(F, fit):
-            lh = F.att(h) * F.de(a) * fit['hl'] * adj_h
-            la = F.att(a) * F.de(h) * fit['al'] * adj_a
+            sh, sa = (math.sqrt(fit['hl'] * fit['al']),) * 2 if neutral else (fit['hl'], fit['al'])
+            lh = F.att(h) * F.de(a) * sh * adj_h
+            la = F.att(a) * F.de(h) * sa * adj_a
             return min(6.0, max(0.05, lh)), min(6.0, max(0.05, la))
 
         rlh, rla = lambdas(R, res)
         glh, gla = lambdas(G, gls)
         rm = score_matrix(rlh, rla, res['rho'], res['l3'])
         gm = score_matrix(glh, gla, gls['rho'], gls['l3'])
+        pred = self._assemble(fx, lg, rm, gm, (rlh, rla), (glh, gla), form, 'full')
+        pred['strength'] = {
+            'home_attack_home': round(R.att(h) * vhA, 3), 'home_defence_home': round(R.de(h) * vhD, 3),
+            'away_attack_away': round(R.att(a) * vaA, 3), 'away_defence_away': round(R.de(a) * vaD, 3),
+        }
+        pred['model'] = {'n': res['n'], 'rho': res['rho'], 'l3': round(res['l3'], 3), 'cutoff': cutoff,
+                         'evidence': [round(R.weight(h), 1), round(R.weight(a), 1)],
+                         'pool': 'national teams' if pool is not None else None}
+        pred['why'] = explain(home, away, pred)
+        if pool is not None:
+            pred['why'][0] = (f"{home} score {form['home']['for']:.2f} and concede {form['home']['against']:.2f} "
+                              f"per game, {away} {form['away']['for']:.2f} and {form['away']['against']:.2f} "
+                              f"(last {form['home']['n']} / {form['away']['n']} internationals, friendlies count half).")
+        return pred
+
+    def _cold_match(self, fx, lg, cutoff, res, neutral, national):
+        """Cold start: a team with too few stored matches (or a competition
+        GOAL20 has barely seen) is still rated - from the competition's (or
+        worldwide) average scoring and each team's last 10 results anywhere,
+        pulled hard toward average. Marked "cold" everywhere it is shown."""
+        self.cold += 1
+        home, away = fx['h'].get('name') or 'Home', fx['a'].get('name') or 'Away'
+        h, a = fx['h']['id'], fx['a']['id']
+        hl, al, rho, l3, source = self._baseline(lg, cutoff, res)
+        g = max(0.3, (hl + al) / 2)
+        k = 8.0
+        R = Ratings(res) if res else None
+
+        def strength(team):
+            gf, ga, n = self._recent_form(team, cutoff)
+            if R is not None and team in R.slot:
+                return R.att(team), R.de(team), n, gf, ga
+            return (gf + k * g) / ((n + k) * g), (ga + k * g) / ((n + k) * g), n, gf, ga
+
+        ah, dh, nh, gfh, gah = strength(h)
+        aa, da, na, gfa, gaa = strength(a)
+        sh, sa = (math.sqrt(hl * al),) * 2 if neutral else (hl, al)
+        lh = min(6.0, max(0.05, ah * da * sh))
+        la = min(6.0, max(0.05, aa * dh * sa))
+        m = score_matrix(lh, la, rho, l3)
+        form = {'home': {'n': nh, 'for': round(gfh / nh, 2) if nh else 0.0, 'against': round(gah / nh, 2) if nh else 0.0},
+                'away': {'n': na, 'for': round(gfa / na, 2) if na else 0.0, 'against': round(gaa / na, 2) if na else 0.0},
+                'any_venue': True}
+        pred = self._assemble(fx, lg, m, m, (lh, la), (lh, la), form, 'cold')
+        pred['strength'] = {'home_attack_home': round(ah, 3), 'home_defence_home': round(dh, 3),
+                            'away_attack_away': round(aa, 3), 'away_defence_away': round(da, 3)}
+        pred['model'] = {'n': (res or {}).get('n', 0), 'rho': rho, 'l3': round(l3, 3), 'cutoff': cutoff,
+                         'evidence': [nh, na], 'cold': True, 'baseline': source,
+                         'pool': 'national teams' if national else None}
+        pred['why'] = explain(home, away, pred)
+        pred['why'][0] = (f"Thin data (cold start): {home} has {nh} stored match(es), {away} {na}. "
+                          f"GOAL20 leans on {source} and each side's recent results, so trust this less.")
+        return pred
+
+    def _assemble(self, fx, lg, rm, gm, xg_res, xg_goals, form, quality):
         probs = market_probabilities(rm, gm)
         status, market, p = filter_high_confidence_picks(probs)
         bx, by = max(((x, y) for x in range(len(rm)) for y in range(len(rm))), key=lambda c: rm[c[0]][c[1]])
-        pred = {
-            'id': fx['id'], 'ts': fx['ts'], 'lg': lg, 'h': h, 'a': a, 'home': home, 'away': away,
-            'status': status, 'reason': 'ok' if status == STATUS_PICK else 'below_70',
+        return {
+            'id': fx['id'], 'ts': fx['ts'], 'lg': fx['lg']['id'], 'h': fx['h']['id'], 'a': fx['a']['id'],
+            'home': fx['h'].get('name') or 'Home', 'away': fx['a'].get('name') or 'Away',
+            'status': status, 'reason': 'ok' if status == STATUS_PICK else 'below_70', 'quality': quality,
             'pick': ({'market': market, 'label': LABELS[market], 'probability': round(p, 4),
                       'fair_odds': round(1 / p, 2)} if status == STATUS_PICK else None),
             'best': {'market': market, 'label': LABELS[market], 'probability': round(p, 4)},
             'probs': {m: round(v, 4) for m, v in probs.items()},
             'more': {m: round(v, 4) for m, v in extra_probabilities(rm, gm).items()},
-            'xg': [round(rlh, 2), round(rla, 2)],
-            'xg_goals': [round(glh, 2), round(gla, 2)],
+            'xg': [round(xg_res[0], 2), round(xg_res[1], 2)],
+            'xg_goals': [round(xg_goals[0], 2), round(xg_goals[1], 2)],
             'score': [bx, by, round(rm[bx][by], 4)],
             'scores': [round(1 - sum(gm[0]), 4), round(1 - sum(row[0] for row in gm), 4)],
-            # Attack strength / defence weakness at this venue (1.00 = league
-            # average; defence above 1 = concedes more than average).
-            'strength': {
-                'home_attack_home': round(R.att(h) * vhA, 3), 'home_defence_home': round(R.de(h) * vhD, 3),
-                'away_attack_away': round(R.att(a) * vaA, 3), 'away_defence_away': round(R.de(a) * vaD, 3),
-            },
-            'form': {
-                'home': {'n': hv['n'], 'for': round(hv['gf'] / hv['sw'], 2) if hv['sw'] else 0.0,
-                         'against': round(hv['ga'] / hv['sw'], 2) if hv['sw'] else 0.0},
-                'away': {'n': av['n'], 'for': round(av['gf'] / av['sw'], 2) if av['sw'] else 0.0,
-                         'against': round(av['ga'] / av['sw'], 2) if av['sw'] else 0.0},
-            },
-            'model': {'n': res['n'], 'rho': res['rho'], 'l3': round(res['l3'], 3), 'cutoff': cutoff,
-                      'evidence': [round(R.weight(h), 1), round(R.weight(a), 1)]},
+            'form': form,
         }
-        pred['why'] = explain(home, away, pred)
-        return pred
 
     def predict_day(self, day_key, fixtures):
         """Predictions for one day's fixtures. Matches that already kicked

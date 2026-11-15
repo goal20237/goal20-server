@@ -15,6 +15,7 @@ from . import config, fdcouk, rank
 from . import fdorg
 from . import fcharts
 from . import oddspapi
+from . import espn, internationals
 from .cache import Cache
 from .data_fetcher import DataFetcher
 from .prediction_engine import PARAMS as PREDICTION_PARAMS, PredictionEngine
@@ -703,6 +704,202 @@ def merge_fcharts(history, state, fetch_allowed):
     return added
 
 
+def merge_espn(history, state, full):
+    """ESPN's worldwide scoreboard (national teams, about 60 club leagues):
+    - a match GOAL20 already has from another source gets ESPN's id (for the
+      phones' live scores) and ESPN's same-day score;
+    - a match only ESPN has is added to the day files;
+    - finished matches of competitions only ESPN covers go into the history.
+    Returns the national-team results seen by ESPN (for the ratings)."""
+    if not espn.ENABLED:
+        return []
+    try:
+        log('ESPN: ' + espn.refresh(full, log))
+    except Exception as e:  # a source problem must never stop the run
+        log(f'ESPN: {e}')
+    days = espn.cached_days()
+    if not days:
+        return []
+    from datetime import datetime as _dt
+    meta, by_id = {}, {}
+    for day in sorted(days):
+        meta.update(days[day].get('leagues') or {})
+        for e in days[day].get('events') or []:
+            by_id[e['id']] = e
+    nations = internationals.known_teams()
+
+    def national(e):
+        slug = e['lg']
+        if espn.is_international(slug):
+            return True
+        if slug.split('.')[0] in espn.COUNTRY:
+            return False
+        return (internationals.canonical(e['h']['n']) in nations
+                and internationals.canonical(e['a']['n']) in nations)
+
+    teams = {t['id']: t for t in history.get('t', [])}
+    lgs = {l['id']: l for l in history.get('l', [])}
+    index = _team_index(history)
+    by_norm = {}
+    for c, names in index.items():
+        for n, tid in names.items():
+            by_norm.setdefault(norm(n), set()).add(tid)
+    matchers = {}
+
+    def club_id(t, slug):
+        key = t['id']
+        if key and key in state.espn_teams:
+            return state.espn_teams[key]
+        tid = None
+        if not is_youth(t['n']):
+            ids = by_norm.get(norm(t['n'])) or set()
+            if len(ids) == 1:
+                tid = next(iter(ids))
+            else:
+                country = espn.country_of(slug)
+                if country in index:
+                    if country not in matchers:
+                        matchers[country] = Matcher({country: set(index[country])})
+                    hit = matchers[country].match(t['n'], country)
+                    if hit:
+                        tid = index[country].get(hit[0].split('|', 1)[1])
+        if tid is not None and key:
+            state.espn_teams[key] = tid
+            return tid
+        return synthetic_id(f'espn-team|{key or t["n"]}')
+
+    def team_of(e, side):
+        t = e[side]
+        tid = internationals.team_id(t['n']) if national(e) else club_id(t, e['lg'])
+        if tid not in teams:
+            teams[tid] = {'id': tid, 'name': t['n'], 'logo': t.get('logo') or ''}
+            history['t'].append(teams[tid])
+        elif not teams[tid].get('logo') and t.get('logo'):
+            teams[tid]['logo'] = t['logo']
+        known = teams[tid]
+        return {'id': tid, 'name': known.get('name') or t['n'], 'logo': known.get('logo') or t.get('logo') or ''}
+
+    def league_of(e):
+        slug = e['lg']
+        info = meta.get(slug) or {}
+        lid = synthetic_id('league|espn-' + slug)
+        season = _dt.fromtimestamp(e['ts'], config.CAMEROON).year
+        if lid not in lgs:
+            lgs[lid] = {'id': lid, 'name': info.get('name') or slug, 'country': espn.country_of(slug),
+                        'logo': (f"https://a.espncdn.com/i/leaguelogos/soccer/500/{info['id']}.png"
+                                 if info.get('id') else ''), 'flag': '', 'season': season}
+            history['l'].append(lgs[lid])
+        return dict(lgs[lid], season=season)
+
+    def similar(a, b):
+        na, nb = norm(a), norm(b)
+        return na == nb or (len(na) >= 4 and len(nb) >= 4 and (na in nb or nb in na))
+
+    # 1. The day files: attach, update or add.
+    today = config.today_cm()
+    keys = [config.day_key(today + timedelta(days=i)) for i in range(-7, 2)]
+    window = {k: [] for k in keys}
+    for e in by_id.values():
+        k = config.day_key(_dt.fromtimestamp(e['ts'], config.CAMEROON).date())
+        if k in window:
+            window[k].append(e)
+    twins, own = {}, {}
+    attached = added = updated = 0
+    now = int(config.now_utc().timestamp())
+    for k in keys:
+        evs = window[k]
+        d = load_day(k)
+        if d is None and not evs:
+            continue
+        d = d or {'f': [], 'final': False}
+        current = {f['id']: f for f in d['f']}
+        changes = 0
+        for e in evs:
+            nat = national(e)
+            fid = synthetic_id(f'espn|{e["id"]}')
+            ref = {'lg': e['lg'], 'id': e['id'], 'd': e['d']}
+            twin = current.get(fid)
+            if twin is None:
+                for f in current.values():
+                    if f.get('src') == 'espn' or abs(f['ts'] - e['ts']) > 3 * 3600:
+                        continue
+                    if similar(f['h']['name'], e['h']['n']) and similar(f['a']['name'], e['a']['n']):
+                        twin = f
+                        break
+                if twin is not None:
+                    twins[e['lg']] = twins.get(e['lg'], 0) + 1
+                elif not nat:
+                    own[e['lg']] = own.get(e['lg'], 0) + 1
+            if twin is None:
+                fx = {'id': fid, 'ts': e['ts'], 'st': e['st'], 'stl': espn.LONG.get(e['st'], e['st']),
+                      'el': e.get('el'), 'lg': league_of(e), 'rd': '', 'vn': '',
+                      'h': team_of(e, 'h'), 'a': team_of(e, 'a'),
+                      'hg': e.get('hg'), 'ag': e.get('ag'), 'fh': e.get('fh'), 'fa': e.get('fa'),
+                      'src': 'espn', 'espn': ref}
+                if nat:
+                    fx['pool'] = 'intl'
+                current[fid] = fx
+                added += 1
+                changes += 1
+                continue
+            if twin.get('espn') != ref:
+                twin['espn'] = ref
+                attached += 1
+                changes += 1
+            # ESPN's score is same-day: use it when GOAL20 has nothing newer.
+            if twin['st'] not in DONE_CODES and e['st'] != twin['st'] and (
+                    e['st'] in DONE_CODES or e['st'] in ('1H', 'HT', '2H', 'ET', 'P', 'PST', 'CANC', 'ABD')
+                    or twin.get('src') == 'espn'):
+                twin.update({'st': e['st'], 'stl': espn.LONG.get(e['st'], e['st']), 'el': e.get('el'),
+                             'hg': e.get('hg'), 'ag': e.get('ag'), 'fh': e.get('fh'), 'fa': e.get('fa')})
+                updated += 1
+                changes += 1
+            elif twin.get('src') == 'espn' and twin['st'] == e['st'] and (
+                    twin.get('hg'), twin.get('ag'), twin.get('el')) != (e.get('hg'), e.get('ag'), e.get('el')):
+                twin.update({'el': e.get('el'), 'hg': e.get('hg'), 'ag': e.get('ag'),
+                             'fh': e.get('fh'), 'fa': e.get('fa')})
+                changes += 1
+        if changes:
+            fixtures_sorted = sorted(current.values(), key=lambda f: f['ts'])
+            save_day(k, fixtures_sorted, day_is_final(k, fixtures_sorted))
+    for slug in set(twins) | set(own):
+        t, o = twins.get(slug, 0), own.get(slug, 0)
+        state.espn_own[slug] = o >= 3 and t <= 0.2 * (t + o)
+
+    # 2. History: finished matches of the competitions only ESPN covers.
+    cutoff = now - config.HISTORY_DAYS * 86400
+    known = {r[0] for r in history['m']}
+    pairs = {}
+    for r in history['m']:
+        pairs.setdefault((r[4], r[5]), []).append(r[1])
+    rows_added = 0
+    intl_events = []
+    for e in by_id.values():
+        if e.get('fh') is None or e.get('fa') is None or e['ts'] < cutoff:
+            continue
+        if national(e):
+            intl_events.append(e)
+            continue
+        if not state.espn_own.get(e['lg']):
+            continue
+        mid = synthetic_id(f'espn|{e["id"]}')
+        if mid in known:
+            continue
+        h, a = team_of(e, 'h'), team_of(e, 'a')
+        if any(abs(t - e['ts']) < 6 * 3600 for t in pairs.get((h['id'], a['id']), [])):
+            continue
+        lg = league_of(e)
+        history['m'].append([mid, e['ts'], lg['id'], lg['season'], h['id'], a['id'], e['fh'], e['fa']])
+        known.add(mid)
+        pairs.setdefault((h['id'], a['id']), []).append(e['ts'])
+        rows_added += 1
+    own_n = sum(1 for v in state.espn_own.values() if v)
+    log(f'ESPN: {added} matches added, {attached} linked to matches GOAL20 had, {updated} scores updated, '
+        f'{rows_added} results added to the history ({own_n} competitions only ESPN covers), '
+        f'{len(intl_events)} national-team results')
+    return intl_events
+
+
 def add_finished_rows(history):
     """Adds finished matches from the published day files to the history."""
     known = {r[0] for r in history['m']}
@@ -966,6 +1163,9 @@ def publish(history, enrich, keys, api, state, mode, extra=None):
         'sources': [x for x, on in (('api-football', api.available), ('football-data.org', not api.available and fdorg.available()),
                                      ('football-charts.com', fcharts.available()),
                                      ('oddspapi.io (betPawa prices)', oddspapi.available()),
+                                     ('ESPN scoreboard (worldwide, national teams)', espn.ENABLED),
+                                     ('international results (martj42, public domain)',
+                                      os.path.exists(internationals.PATH)),
                                      ('football-data.co.uk', True)) if on],
         'attribution': [fcharts.ATTRIBUTION] if fcharts.available() else [],
         'status_note': status_note(api, state),
@@ -992,9 +1192,10 @@ def publish(history, enrich, keys, api, state, mode, extra=None):
 
 # --------------------------------------------------------------------- main
 
-def make_predictions(history, cache):
-    """predictionEngine over yesterday, today and tomorrow (Cameroon days)."""
-    engine = PredictionEngine(history, cache, log)
+def make_predictions(history, cache, intl_rows=()):
+    """predictionEngine over yesterday, today and tomorrow (Cameroon days).
+    National teams are rated together from intl_rows."""
+    engine = PredictionEngine(history, cache, log, pools={'intl': internationals.POOL}, pool_rows=intl_rows)
     out = {}
     for i in (-1, 0, 1):
         k = config.day_key(config.today_cm() + timedelta(days=i))
@@ -1003,7 +1204,8 @@ def make_predictions(history, cache):
     picks = sum(v['summary']['picks'] for v in out.values())
     total = sum(v['summary']['matches'] for v in out.values())
     log(f'Predictions: {total} matches, {picks} picks at 70%+, {total - picks} SKIPPED_LOW_EDGE '
-        f'({engine.fitted} competitions rated, {engine.reused} ratings reused from the cache)')
+        f'({engine.fitted} competitions rated, {engine.reused} ratings reused from the cache, '
+        f'{engine.cold} cold-start ratings, {len(intl_rows)} national-team results)')
     return out
 
 
@@ -1084,6 +1286,7 @@ def main():
         history = previous
         if use_fdorg:
             merge_fdorg(history, state, fetcher)
+        intl_events = merge_espn(history, state, full=False)
         added = add_finished_rows(history)
         log(f'Quick run: reused published history ({len(history["m"])} results, {added} new)')
     else:
@@ -1096,6 +1299,7 @@ def main():
         # football-charts.com is read once a day, and only by full runs
         # (quick runs do not save the data folder).
         merge_fcharts(history, state, fetch_allowed=(mode == 'full'))
+        intl_events = merge_espn(history, state, full=(mode == 'full'))
         add_finished_rows(history)
         upcoming = [f for k in (keys['today'], keys['tomorrow']) for f in (load_day(k) or {}).get('f', [])]
         enrich['fdodds'] = {}
@@ -1114,8 +1318,14 @@ def main():
     if fdorg.available():
         standings, note = fetcher.standings()
         log(f'football-data.org standings: {note}')
+    if mode == 'full':
+        try:
+            log('International results: ' + internationals.refresh(log))
+        except Exception as e:  # a source problem must never stop the run
+            log(f'International results: {e}')
+        espn.prune()
     try:
-        predictions = make_predictions(history, cache)
+        predictions = make_predictions(history, cache, internationals.history_rows(intl_events))
     except Exception as e:  # never stop the site update
         import traceback
         log(f'Predictions failed: {e}')

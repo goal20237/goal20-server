@@ -132,6 +132,18 @@ From then on, the app syncs every time it opens.
   `FOOTBALL_DATA_API_KEY=`. `.env` is in `.gitignore`: git never uploads it.
   Then run `python -m server.main`.
 
+## Worldwide coverage (server 1.9)
+
+- **ESPN scoreboard** (free, keyless, unofficial): national teams and about
+  60 club leagues, one request per day; days kept in `data/espn/`. Full runs
+  also fill in up to 150 past days (40 per run) for competitions only ESPN
+  covers. Set `GOAL20_ESPN=0` to switch it off.
+- **International results** (martj42, public domain, read once a day): the
+  history behind the national-team ratings, kept in `data/intl/`.
+- **Cold start**: teams with few stored matches are still rated (marked
+  "thin data"). The 1000+ longshot falls back to estimated fair-odds legs when
+  real prices run out, and then drops the +EV badge.
+
 ## Data sources
 
 - **API-Football:** worldwide fixtures, results, live scores, injuries, odds. Free plan: 100 requests/day; it can't read current seasons directly, which is why football-data.co.uk is added.
@@ -148,6 +160,8 @@ server/data_fetcher.py football-data.org fetcher: 6-hour, 4-a-day anti-ban gate
 server/cache.py       SQLite cache (responses, cycles, ratings, frozen predictions)
 server/prediction_engine.py Dixon-Coles + bivariate Poisson, 70% filter, bullets
 server/tickets.py     Daily 3 Sure-Shot Picks and the 1000+ Odds Value Longshot
+server/espn.py        ESPN worldwide scoreboard (national teams, ~60 leagues)
+server/internationals.py national-team results and ratings pool
 server/apifootball.py API-Football client: quota guard, plan-limit detection
 server/fdcouk.py      football-data.co.uk results and odds
 server/names.py       team-name matching between the two sources

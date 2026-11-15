@@ -46,6 +46,8 @@ LONGSHOT = {
     'max_edge': 0.50,         # a bigger "edge" is almost always a data error
     'min_evidence': 8.0,
     'badge': 'High-Variance +EV Ticket — Minimal Stake Only',
+    'badge_estimated': 'High-Variance Ticket — Minimal Stake Only (estimated odds)',
+    'fallback_fair': (1.70, 3.00),
 }
 # GOAL20 market -> key of the bookmaker price in the published odds.
 PRICE_KEY = {'1': 'home', 'X': 'draw', '2': 'away', 'O1.5': 'over15',
@@ -103,12 +105,19 @@ def price_for(quotes, key):
     return float(q['o']), (q.get('b') or 'bookmaker').replace(' (football-data)', '')
 
 
-def _open(pred, now, min_evidence):
-    """Rated, not started, enough evidence on both teams."""
+def is_cold(pred):
+    return pred.get('quality') == 'cold' or bool((pred.get('model') or {}).get('cold'))
+
+
+def _open(pred, now, min_evidence, allow_cold=False):
+    """Rated, not started, enough evidence on both teams (or, with
+    allow_cold, a cold-start rating)."""
     if pred.get('ts', 0) <= now or not pred.get('probs'):
         return False
     if pred.get('st') and pred['st'] not in ('NS', 'TBD'):
         return False
+    if is_cold(pred):
+        return allow_cold
     ev = (pred.get('model') or {}).get('evidence') or [0, 0]
     return min(ev) >= min_evidence
 
@@ -138,8 +147,9 @@ def generate_daily_top3(preds, now, day=''):
     lo, hi = TOP3['fair_band']
     ranked = []
     for pred in preds:
-        if not _open(pred, now, TOP3['min_evidence']):
+        if not _open(pred, now, TOP3['min_evidence'], allow_cold=True):
             continue
+        cold = is_cold(pred)
         best = None
         for m in TOP3['markets']:
             p = probability(pred, m)
@@ -152,8 +162,9 @@ def generate_daily_top3(preds, now, day=''):
             if best is None or key < best[0]:
                 best = (key, m, p)
         if best:
-            ranked.append((best[0], pred['ts'], pred['id'], _leg(pred, best[1], best[2], 1 / best[2],
-                                                                 in_band=best[0][0] == 0)))
+            # Teams with full data always come before cold-start ratings.
+            ranked.append(((1 if cold else 0,) + best[0], pred['ts'], pred['id'],
+                           _leg(pred, best[1], best[2], 1 / best[2], in_band=best[0][0] == 0, cold=cold)))
     ranked.sort(key=lambda r: r[:3])
     legs = [r[3] for r in ranked[:TOP3['legs']]]
     ticket = {
@@ -172,64 +183,89 @@ def generate_daily_top3(preds, now, day=''):
     in_band = sum(1 for l in legs if l.get('in_band'))
     ticket['note'] = ('All 3 legs in the 1.20-1.55 fair-odds band.' if in_band == 3 else
                       f'{in_band} of 3 legs in the 1.20-1.55 band; the others are safer (fair odds under 1.20).')
+    cold = sum(1 for l in legs if l.get('cold'))
+    if cold:
+        ticket['note'] += f' {cold} leg(s) use a cold-start rating (thin data): trust them less.'
     return _totals(ticket)
 
 
 def generate_high_odds_accumulator(preds, odds, now, day='', target_odds=LONGSHOT['target_odds']):
     """1000+ Odds Value Longshot for one day's predictions. odds: the
-    published odds by fixture id ({'v': [{'b', 'm', 'o'}]})."""
-    ranked = []
+    published odds by fixture id ({'v': [{'b', 'm', 'o'}]}).
+
+    1. Legs with a REAL price and positive value, best value first.
+    2. If those cannot reach the target within 14 legs, the rest is filled
+       with estimated legs at the model's fair odds (1.70-3.00, the most
+       likely outcomes first, full-data teams before cold starts). Their
+       value is zero by definition and a bookmaker pays less: the ticket
+       then says so and loses the +EV badge."""
+    value, fallback = [], []
     priced = 0
     for pred in preds:
-        if not _open(pred, now, LONGSHOT['min_evidence']):
+        if not _open(pred, now, LONGSHOT['min_evidence'], allow_cold=True):
             continue
+        cold = is_cold(pred)
         quotes = ((odds or {}).get(str(pred['id'])) or {}).get('v') or []
-        best = None
+        best = est = None
         for m in LONGSHOT['markets']:
             p = probability(pred, m)
+            if p is None or p <= 0:
+                continue
             price, source = price_for(quotes, PRICE_KEY[m])
-            if price is None:
-                continue
-            priced += 1
-            if p is None or p < LONGSHOT['min_probability'] or price < LONGSHOT['min_price']:
-                continue
-            edge = p * price - 1
-            if not LONGSHOT['min_edge'] <= edge <= LONGSHOT['max_edge']:
-                continue
-            if best is None or edge > best[0]:
-                best = (edge, m, p, price, source)
+            if price is not None:
+                priced += 1
+                edge = p * price - 1
+                if (not cold and p >= LONGSHOT['min_probability'] and price >= LONGSHOT['min_price']
+                        and LONGSHOT['min_edge'] <= edge <= LONGSHOT['max_edge']):
+                    if best is None or edge > best[0]:
+                        best = (edge, m, p, price, source)
+            fair = 1 / p
+            if LONGSHOT['fallback_fair'][0] <= fair <= LONGSHOT['fallback_fair'][1]:
+                key = (1 if cold else 0, -p)
+                if est is None or key < est[0]:
+                    est = (key, m, p)
         if best:
             edge, m, p, price, source = best
-            ranked.append(_leg(pred, m, p, price, price=round(price, 2), source=source, edge=round(edge, 4)))
+            value.append(_leg(pred, m, p, price, price=round(price, 2), source=source, edge=round(edge, 4)))
+        elif est:
+            key, m, p = est
+            fallback.append(_leg(pred, m, p, 1 / p, source='estimated (model fair odds)', estimated=True,
+                                 edge=0.0, cold=bool(key[0])))
     # Strictly by expected value, then earlier kickoff.
-    ranked.sort(key=lambda l: (-l['edge'], l['ts'], l['id']))
+    value.sort(key=lambda l: (-l['edge'], l['ts'], l['id']))
+    fallback.sort(key=lambda l: (1 if l.get('cold') else 0, -l['probability'], l['ts'], l['id']))
     legs, total = [], 1.0
-    for leg in ranked:
-        if total >= target_odds or len(legs) >= LONGSHOT['max_legs']:
+    for leg in value + fallback:
+        if len(legs) >= LONGSHOT['max_legs'] or total >= target_odds:
             break
         legs.append(leg)
         total *= leg['odds']
     legs.sort(key=lambda l: (l['ts'], l['id']))
+    estimated = sum(1 for l in legs if l.get('estimated'))
     ticket = {
-        'kind': 'longshot', 'title': LONGSHOT['title'], 'day': day, 'badge': LONGSHOT['badge'],
-        'built': int(now), 'odds_kind': 'price', 'target': target_odds, 'legs': legs,
-        'candidates': len(ranked), 'priced_markets': priced,
-        'rules': (f"1X2, BTTS & Over 2.5, team Over 1.5 with a real price {LONGSHOT['min_price']:.2f}+, "
+        'kind': 'longshot', 'title': LONGSHOT['title'], 'day': day,
+        'badge': LONGSHOT['badge'] if legs and not estimated else LONGSHOT['badge_estimated'],
+        'built': int(now), 'odds_kind': 'price' if not estimated else 'mixed', 'target': target_odds,
+        'legs': legs, 'candidates': len(value), 'estimated_legs': estimated, 'priced_markets': priced,
+        'rules': (f"real prices first: 1X2, BTTS & Over 2.5, team Over 1.5 at {LONGSHOT['min_price']:.2f}+, "
                   f"model {LONGSHOT['min_probability']:.0%}+, value +{LONGSHOT['min_edge']:.0%} to "
-                  f"+{LONGSHOT['max_edge']:.0%}, best value first, max {LONGSHOT['max_legs']} legs"),
+                  f"+{LONGSHOT['max_edge']:.0%}, best value first; then estimated legs at fair odds "
+                  f"{LONGSHOT['fallback_fair'][0]:.2f}-{LONGSHOT['fallback_fair'][1]:.2f}, most likely first; "
+                  f"up to {LONGSHOT['max_legs']} legs"),
     }
     if len(legs) < LONGSHOT['min_legs']:
         ticket['legs'] = []
         ticket['status'] = 'SKIPPED_LOW_EDGE'
-        ticket['note'] = (f'Only {len(legs)} leg(s) with real prices show value today '
-                          f'({priced} priced markets checked): no longshot.')
+        ticket['note'] = 'Not enough rated matches left today to build a longshot.'
     elif total >= target_odds:
         ticket['status'] = 'READY'
-        ticket['note'] = f'{len(legs)} value legs reach the {target_odds:,.0f} target.'
+        ticket['note'] = f'{len(legs)} legs reach the {target_odds:,.0f} target.'
     else:
         ticket['status'] = 'BELOW_TARGET'
-        ticket['note'] = (f'All {len(legs)} value legs with real prices give {total:,.0f}, '
-                          f'short of {target_odds:,.0f}. GOAL20 does not add legs without value to get there.')
+        ticket['note'] = f'All {len(legs)} usable legs give {total:,.0f}, short of {target_odds:,.0f}.'
+    if estimated and ticket['legs']:
+        ticket['note'] += (f" {estimated} of {len(legs)} legs have no real price: their odds are GOAL20's fair "
+                           f"odds (no proven value), and your bookmaker will pay less.")
     return _totals(ticket)
 
 
@@ -243,7 +279,7 @@ def _totals(ticket):
     ticket['fair_odds'] = round(_product(l['fair_odds'] for l in legs), 2) if legs else None
     # Chance the slip pays (a void draw-no-bet leg counts as surviving).
     ticket['chance'] = round(_product(1 - l['lose'] for l in legs), 6) if legs else None
-    if ticket['odds_kind'] == 'price' and legs:
+    if ticket['odds_kind'] in ('price', 'mixed') and legs:
         ticket['ev'] = round(_product(l['probability'] * l['odds'] for l in legs) - 1, 4)
     ticket['first_kickoff'] = min((l['ts'] for l in legs), default=None)
     return ticket

@@ -87,9 +87,21 @@ def main():
     fc_world = {'leagues': [], 'fixtures': {}, 'results': {}}
     op_world = {'markets': [], 'tournaments': [], 'odds': []}
     op_calls = []
+    espn_world = {}
+    intl_csv = {'body': b'date,home_team,away_team,home_score,away_score,tournament,city,country,neutral\n'}
 
     def fake_fetch(url, headers=None, timeout=40, retries=2):
         calls.append(url)
+        if 'site.api.espn.com' in url:
+            day = url.split('dates=')[1][:8]
+            groups = {}
+            for slug, lid, lname, ev in espn_world.get('events', []):
+                if ev['date'][:10].replace('-', '') == day:
+                    groups.setdefault(slug, {'leagues': [{'id': lid, 'slug': slug, 'name': lname}],
+                                             'events': []})['events'].append(ev)
+            return 200, {}, json.dumps({'scores': list(groups.values())}).encode()
+        if 'martj42' in url:
+            return 200, {}, intl_csv['body']
         if 'api.oddspapi.io' in url:
             assert 'apiKey=op_SECRET_9' in url, url
             path = url.split('/v4/')[1].split('?')[0]
@@ -168,6 +180,12 @@ def main():
     for mod in (server.net, server.apifootball, server.fdcouk, server.fdorg, server.main):
         importlib.reload(mod)
         mod.fetch = fake_fetch
+    import server.espn
+    import server.internationals
+    server.espn.fetch = fake_fetch
+    server.internationals.fetch = fake_fetch
+    server.espn.PAUSE = 0
+    server.espn.ENABLED = False  # switched on in the ESPN scenario below
     import types
     import time as _time
     server.fdorg.time = types.SimpleNamespace(time=_time.time, sleep=lambda s: None)
@@ -507,6 +525,10 @@ def main():
     e11 = json.loads(gzip.open(os.path.join(site, 'enrich.json.gz')).read())
     assert e11['odds'][str(target_fx['id'])]['v'] == q, 'stored betPawa prices lost'
 
+    # ESPN worldwide feed (server 1.9): national teams, a club match GOAL20
+    # already has, a league only ESPN covers, a women's league (left out).
+    espn_scenario(tmp, site, espn_world, intl_csv, server)
+
     # Server predictions: yesterday, today and tomorrow, every match either
     # PICK (single safest market at 70%+) or SKIPPED_LOW_EDGE, 3 bullets each.
     m12 = json.load(open(os.path.join(site, 'manifest.json')))
@@ -536,7 +558,8 @@ def main():
     for k in m12['files']['predictions']:
         body = json.load(open(os.path.join(site, 'predictions', f'{k}.json')))
         assert set(body['tickets']) == {'top3', 'longshot'}, body.get('tickets')
-        assert body['tickets']['longshot']['badge'] == 'High-Variance +EV Ticket \u2014 Minimal Stake Only'
+        assert body['tickets']['longshot']['badge'] in ('High-Variance +EV Ticket \u2014 Minimal Stake Only',
+                                                        'High-Variance Ticket \u2014 Minimal Stake Only (estimated odds)')
     assert set(m12['tickets_record']) == {'top3', 'longshot'}, m12.get('tickets_record')
     assert os.path.exists(os.path.join(tmp, 'data', 'tickets.json')), 'ticket archive not written'
     site_text = ''
@@ -554,8 +577,51 @@ def main():
     shutil.rmtree(tmp)
 
 
+def espn_parser_checks():
+    import server.espn as es
+    sample = {'scores': [
+        {'leagues': [{'id': '2395', 'slug': 'uefa.nations', 'name': 'UEFA Nations League'}], 'events': [{
+            'id': '401861165', 'date': '2026-11-14T17:00Z', 'name': 'Wales at Norway',
+            'status': {'clock': 5400, 'displayClock': "90'+6'", 'period': 2,
+                       'type': {'name': 'STATUS_FULL_TIME', 'state': 'post', 'completed': True}},
+            'competitions': [{'competitors': [
+                {'homeAway': 'home', 'score': '3', 'team': {'id': '464', 'displayName': 'Norway', 'logo': 'n.png'}},
+                {'homeAway': 'away', 'score': '1', 'team': {'id': '578', 'displayName': 'Wales', 'logo': 'w.png'}}],
+                'details': [{'type': {'text': 'Goal'}, 'clock': {'displayValue': "59'"}, 'team': {'id': '464'},
+                             'scoringPlay': True}]}]}]},
+        {'leagues': [{'id': '8097', 'slug': 'eng.w.1', 'name': "English Women's Super League"}], 'events': [{
+            'id': '1', 'date': '2026-11-14T12:00Z', 'status': {'type': {'name': 'STATUS_SCHEDULED', 'state': 'pre'}},
+            'competitions': [{'competitors': [{'homeAway': 'home', 'team': {'id': '1', 'displayName': 'A'}},
+                                              {'homeAway': 'away', 'team': {'id': '2', 'displayName': 'B'}}]}]}]},
+        {'leagues': [{'id': '3952', 'slug': 'fra.coupe_de_france', 'name': 'Coupe de France'}], 'events': [{
+            'id': '2', 'date': '2026-11-14T19:00Z',
+            'status': {'displayClock': "120'", 'type': {'name': 'STATUS_FINAL_PEN', 'state': 'post'}},
+            'competitions': [{'competitors': [
+                {'homeAway': 'home', 'score': '2', 'team': {'id': '10', 'displayName': 'Metz'}},
+                {'homeAway': 'away', 'score': '2', 'team': {'id': '11', 'displayName': 'Nancy'}}],
+                'details': [{'clock': {'displayValue': "30'"}, 'team': {'id': '10'}, 'scoringPlay': True, 'type': {}},
+                            {'clock': {'displayValue': "90'+2'"}, 'team': {'id': '11'}, 'scoringPlay': True, 'type': {}},
+                            {'clock': {'displayValue': "105'"}, 'team': {'id': '10'}, 'scoringPlay': True, 'type': {}},
+                            {'clock': {'displayValue': "118'"}, 'team': {'id': '11'}, 'scoringPlay': True,
+                             'type': {}}]}]}]},
+    ]}
+    day = es.parse_scorepanel(sample, '20261114')
+    assert set(day['leagues']) == {'uefa.nations', 'fra.coupe_de_france'}, day['leagues']
+    nor = day['events'][0]
+    assert (nor['st'], nor['hg'], nor['ag'], nor['fh'], nor['fa']) == ('FT', 3, 1, 3, 1), nor
+    assert nor['h']['n'] == 'Norway' and nor['ts'] == 1794675600 and nor['d'] == '20261114'
+    pen = day['events'][1]
+    assert pen['st'] == 'PEN' and (pen['fh'], pen['fa']) == (1, 1), pen  # 90-minute score from the goals
+    assert es.status_code({'type': {'name': 'STATUS_HALFTIME', 'state': 'in'}}) == 'HT'
+    assert es.status_code({'period': 2, 'type': {'name': 'STATUS_IN_PROGRESS', 'state': 'in'}}) == '2H'
+    assert es.status_code({'type': {'name': 'STATUS_POSTPONED', 'state': 'pre'}}) == 'PST'
+    assert es.is_international('fifa.worldq.caf') and not es.is_international('eng.1')
+    assert es.excluded('usa.ncaa.m.1') and es.excluded('fifa.friendly_u21') and not es.excluded('uefa.nations')
+
+
 def engine_checks(tmp):
     """dataFetcher gating, .env loading and predictionEngine maths."""
+    espn_parser_checks()
     import types
     import server.cache
     import server.config
@@ -659,8 +725,39 @@ def engine_checks(tmp):
     assert by[1]['status'] == 'PICK' and by[1]['probs']['1'] > by[1]['probs']['2'], by[1]['probs']
     assert by[1]['xg'][0] > by[1]['xg'][1]
     assert by[3]['status'] == 'SKIPPED_LOW_EDGE' and by[3]['reason'] == 'friendly'
-    assert by[4]['status'] == 'SKIPPED_LOW_EDGE' and by[4]['reason'] == 'not_enough_data'
+    # Unknown competition and teams: still rated (cold start), and labelled.
+    assert by[4]['quality'] == 'cold' and by[4]['why'][0].startswith('Thin data'), by[4]
+    assert by[4]['model']['baseline'] == 'worldwide averages' and by[4]['model']['evidence'] == [0, 0]
+    assert abs(sum(by[4]['probs'][k] for k in ('1', 'X', '2')) - 1) < 2e-3
+    assert by[1]['quality'] == 'full'
     assert all(len(x['why']) == 3 for x in day['p'])
+    # A team new to a rated league: its own few results move the rating.
+    rows2 = rows + [[mid + 500 + i, clock['t'] - 86400 * (i + 1), 77, 2026, 999, (i % 9) + 1, 3, 0] for i in range(2)]
+    eng2 = pe.PredictionEngine({'m': rows2, 'l': hist['l']}, None, lambda *_: None, now=clock['t'])
+    p999 = eng2.predict_match({'id': 5, 'ts': kick, 'st': 'NS', 'lg': {'id': 77, 'name': 'Test League'},
+                               'h': {'id': 999, 'name': 'Newbie'}, 'a': {'id': 1, 'name': 'Weak'}})
+    assert p999['quality'] == 'cold' and p999['model']['baseline'] == 'this competition', p999['model']
+    assert p999['model']['evidence'][0] == 2
+    # Neutral venues: no home advantage in the fit or the prediction.
+    nrows = [r[:8] + [None] * 6 + [1, 1.0] for r in rows]
+    nfit = pe.fit_league(nrows, clock['t'], 6)
+    hfit = pe.fit_league(rows, clock['t'], 6)
+    assert nfit and (nfit['hl'], nfit['al']) == (1.4, 1.1), 'all-neutral rows must not teach a home advantage'
+    assert hfit['hl'] > hfit['al'], 'home rows do'
+    # National-team pool: a fixture tagged pool=intl is rated from the pool rows.
+    pool_id = -424242
+    prow = [[r[0] + 10 ** 6, r[1], pool_id] + r[3:8] + [None] * 6 + [0, 0.5 if r[0] % 4 == 0 else 1.0] for r in rows]
+    eng3 = pe.PredictionEngine({'m': [], 'l': []}, None, lambda *_: None, now=clock['t'], pools={'intl': pool_id},
+                               pool_rows=prow)
+    pp = eng3.predict_match({'id': 6, 'ts': kick, 'st': 'NS', 'pool': 'intl',
+                             'lg': {'id': 4321, 'name': 'International Friendly'},
+                             'h': {'id': 10, 'name': 'Strong'}, 'a': {'id': 1, 'name': 'Weak'}})
+    assert pp['quality'] == 'full' and pp['model']['pool'] == 'national teams', pp.get('model')
+    assert pp['probs']['1'] > pp['probs']['2'] and 'internationals' in pp['why'][0]
+    pn = eng3.predict_match({'id': 7, 'ts': kick, 'st': 'NS', 'pool': 'intl', 'neutral': True,
+                             'lg': {'id': 4321, 'name': 'International Friendly'},
+                             'h': {'id': 10, 'name': 'Strong'}, 'a': {'id': 1, 'name': 'Weak'}})
+    assert pn['xg'][0] < pp['xg'][0], 'a neutral venue removes the home advantage'
     print('Example:', by[1]['home'], '-', by[1]['away'], by[1]['pick'], *by[1]['why'], sep='\n  ')
     # After kickoff the stored prediction is frozen, even if new results arrive.
     rows.append([mid + 1, clock['t'] - 86400 * 2, 77, 2026, 1, 10, 7, 0])
@@ -730,10 +827,12 @@ def ticket_checks(tmp):
     assert tk.generateHighOddsAccumulator is tk.generate_high_odds_accumulator
     assert tk.generateDailyTop3 is tk.generate_daily_top3
     ls = tk.generateHighOddsAccumulator(lp, odds, now, 'd', target_odds=1000)
-    assert ls['badge'] == 'High-Variance +EV Ticket \u2014 Minimal Stake Only'
     legs = ls['legs']
+    if not any(l.get('estimated') for l in legs):
+        assert ls['badge'] == 'High-Variance +EV Ticket \u2014 Minimal Stake Only'
     assert 3 <= len(legs) <= 14 and len({l['id'] for l in legs}) == len(legs)
-    assert all(0.02 <= l['edge'] <= 0.50 and l['price'] >= 1.60 and l['probability'] >= 0.30 for l in legs)
+    assert all(0.02 <= l['edge'] <= 0.50 and l['price'] >= 1.60 and l['probability'] >= 0.30
+               for l in legs if not l.get('estimated'))
     assert 102 not in {l['id'] for l in legs} and 103 not in {l['id'] for l in legs}
     by = {l['id']: l for l in legs}
     small = tk.generate_high_odds_accumulator([lp[1], lp[4], lp[5]], odds, now)
@@ -767,8 +866,31 @@ def ticket_checks(tmp):
           f"{1 / ls['chance']:,.0f}, model value {ls['ev']:+.0%} ({ls['status']})")
     few = tk.generate_high_odds_accumulator(lp[:4], odds, now)
     assert few['status'] in ('BELOW_TARGET', 'SKIPPED_LOW_EDGE') and (few['odds'] or 0) < 1000
-    none = tk.generate_high_odds_accumulator(lp, {}, now)
-    assert none['status'] == 'SKIPPED_LOW_EDGE' and not none['legs'], 'no price, no leg'
+    # No real price anywhere: estimated legs at fair odds, honestly labelled.
+    est = tk.generate_high_odds_accumulator(lp, {}, now)
+    assert est['legs'] and all(l.get('estimated') for l in est['legs']), est
+    assert est['badge'] == 'High-Variance Ticket \u2014 Minimal Stake Only (estimated odds)'
+    assert est['odds_kind'] == 'mixed' and 'no real price' in est['note']
+    assert all(1.70 <= l['odds'] <= 3.00 for l in est['legs'])
+    assert len({l['id'] for l in est['legs']}) == len(est['legs']) <= 14
+    assert est['odds'] >= 1000 and est['status'] == 'READY', (est['odds'], est['status'])
+    assert abs(est['chance'] - 1 / math_prod([l['odds'] for l in est['legs']])) < 1e-4, 'fair legs: chance = 1/odds'
+    # Most likely outcomes first; cold starts only after full-data teams.
+    cold_pred = pred(130, {'1': 0.56, 'X': 0.24, '2': 0.20})
+    cold_pred['quality'] = 'cold'
+    mix = tk.generate_high_odds_accumulator(lp[:6] + [cold_pred], {}, now)
+    ids = [l['id'] for l in mix['legs']]
+    full_ids = {l['id'] for l in tk.generate_high_odds_accumulator(lp[:6], {}, now)['legs']}
+    assert full_ids <= set(ids), 'every full-data leg comes before a cold start'
+    assert 130 in ids and mix['legs'][ids.index(130)]['cold'], ids
+    top = tk.generate_daily_top3([pred(140, {'1X': 0.80, '2': 0.2}), pred(141, {'1X': 0.81, '2': 0.19}),
+                                  dict(pred(142, {'1X': 0.83, '2': 0.17}), quality='cold'),
+                                  pred(143, {'1X': 0.79, '2': 0.21})], now)
+    assert [l['id'] for l in top['legs']] == [141, 140, 143], 'cold leg used before full-data legs'
+    top2 = tk.generate_daily_top3([pred(140, {'1X': 0.80, '2': 0.2}), pred(141, {'1X': 0.81, '2': 0.19}),
+                                   dict(pred(142, {'1X': 0.83, '2': 0.17}), quality='cold')], now)
+    assert [l['id'] for l in top2['legs']] == [141, 140, 142] and top2['legs'][2]['cold']
+    assert 'cold-start' in top2['note']
 
     # ---- Settling: draw no bet void on a draw, any lost leg loses.
     done = {5: {'result': [1, 1]}, 2: {'result': [0, 2]}, 1: {'result': [2, 0]}}
@@ -824,6 +946,103 @@ def ticket_checks(tmp):
     mm = op._markets_map(catalogue)
     assert mm == {'1': 'home', '2': 'draw', '3': 'away', '10': 'over15', '20': 'home_o15',
                   '30': 'away_o15', '40': 'btts_o25', '50': 'btts'}, mm
+
+
+def espn_scenario(tmp, site, espn_world, intl_csv, server):
+    import server.espn as espn_mod
+    import server.internationals as intl_mod
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    rnd = random.Random(3)
+    nations = ['Portugal', 'Denmark', 'Norway', 'Wales', 'Austria', 'Republic of Ireland', 'Romania',
+               'Poland', 'Sweden', 'Bosnia and Herzegovina', 'Cameroon', 'Namibia']
+    power = {n: 1.5 - 0.08 * i for i, n in enumerate(nations)}
+
+    def pois(lam):
+        k, p, acc, u = 0, math_exp(-lam), math_exp(-lam), rnd.random()
+        while u > acc:
+            k += 1
+            p *= lam / k
+            acc += p
+        return k
+    lines = ['date,home_team,away_team,home_score,away_score,tournament,city,country,neutral']
+    start = _dt.now(_tz.utc).date() - _td(days=900)
+    for k in range(340):
+        h, a = rnd.sample(nations, 2)
+        day = start + _td(days=int(k * 2.5))
+        tour = 'Friendly' if k % 5 == 0 else 'UEFA Nations League'
+        lines.append(f'{day},{h},{a},{pois(1.35 * power[h] / power[a])},{pois(1.05 * power[a] / power[h])},'
+                     f'{tour},X,Y,{"TRUE" if k % 9 == 0 else "FALSE"}')
+    intl_csv['body'] = ('\n'.join(lines) + '\n').encode()
+
+    now = _dt.now(_tz.utc)
+    today_cm = server.main.config.today_cm()
+    kick = _dt(today_cm.year, today_cm.month, today_cm.day, 18, 0, tzinfo=_tz.utc)
+    if kick <= now:
+        kick = now + _td(hours=3)
+    tomorrow = kick + _td(days=1)
+
+    def ev(eid, when, home, away, state='pre', name='STATUS_SCHEDULED', hs='0', as_='0', clock="0'", period=0,
+           hid=None, aid=None):
+        return {'id': str(eid), 'date': when.strftime('%Y-%m-%dT%H:%MZ'),
+                'status': {'displayClock': clock, 'period': period, 'type': {'name': name, 'state': state}},
+                'competitions': [{'competitors': [
+                    {'homeAway': 'home', 'score': hs, 'team': {'id': hid or str(eid) + 'h', 'displayName': home,
+                                                               'logo': 'https://a.espncdn.com/x.png'}},
+                    {'homeAway': 'away', 'score': as_, 'team': {'id': aid or str(eid) + 'a', 'displayName': away,
+                                                                'logo': ''}}], 'details': []}]}
+    key_today = server.main.config.day_key(today_cm)
+    day = json.load(gzip.open(os.path.join(tmp, 'data', 'days', f'{key_today}.json.gz')))
+    base = next(f for f in day['f'] if f.get('src') != 'espn' and f['h']['name'] and f['a']['name'])
+    twin_when = _dt.fromtimestamp(base['ts'] + 900, _tz.utc)
+    events = [
+        ('uefa.nations', '2395', 'UEFA Nations League', ev(9001, kick, 'Portugal', 'Denmark')),
+        ('uefa.nations', '2395', 'UEFA Nations League', ev(9002, kick, 'Bosnia-Herzegovina', 'Romania')),
+        ('caf.nations_qual', '2396', 'Africa Cup of Nations Qualifying', ev(9003, tomorrow, 'Cameroon', 'Namibia')),
+        ('eng.1', '700', 'English Premier League', ev(9004, twin_when, base['h']['name'], base['a']['name'])),
+        ('per.1', '670', 'Peruvian Liga 1', ev(9005, kick, 'Alianza Lima', 'Universitario')),
+        ('per.1', '670', 'Peruvian Liga 1', ev(9006, now - _td(minutes=70), 'Sporting Cristal', 'Melgar',
+                                               state='in', name='STATUS_SECOND_HALF', hs='1', clock="67'",
+                                               period=2)),
+        ('eng.w.1', '8097', "English Women's Super League", ev(9010, kick, 'Arsenal Women', 'Chelsea Women')),
+    ]
+    for i in range(4):  # finished matches of the league only ESPN covers
+        events.append(('per.1', '670', 'Peruvian Liga 1',
+                       ev(9020 + i, now - _td(days=2 + i), f'Club {i}', f'Club {i + 4}', state='post',
+                          name='STATUS_FULL_TIME', hs=str(i % 3), as_='1', clock="90'+3'", period=2)))
+    espn_world['events'] = events
+    espn_mod.ENABLED = True
+    server.main.config.MODE = 'full'
+    server.main.LOG.clear()
+    assert server.main.main() == 0
+    log = '\n'.join(server.main.LOG)
+    assert 'ESPN:' in log and 'national-team results' in log, log[-3000:]
+    assert 'International results: 340 results' in log, [l for l in server.main.LOG if 'International' in l]
+    d = json.load(gzip.open(os.path.join(tmp, 'data', 'days', f'{key_today}.json.gz')))
+    by_espn = {f['espn']['id']: f for f in d['f'] if f.get('espn')}
+    assert by_espn['9001'].get('pool') == 'intl' and by_espn['9001']['espn']['lg'] == 'uefa.nations', by_espn.get('9001')
+    assert by_espn['9002']['h']['id'] == intl_mod.team_id('Bosnia and Herzegovina'), 'ESPN name not mapped'
+    twin = by_espn['9004']
+    assert twin['id'] == base['id'] and twin.get('src') != 'espn', 'existing match should get the ESPN id'
+    assert sum(1 for f in d['f'] if f['h']['name'] == base['h']['name'] and abs(f['ts'] - base['ts']) < 7200) == 1
+    assert '9005' in by_espn and by_espn['9005']['src'] == 'espn' and not by_espn['9005'].get('pool')
+    live = by_espn['9006']
+    assert live['st'] == '2H' and live['el'] == 67 and live['hg'] == 1, live
+    assert not any('Women' in f['h']['name'] for f in d['f']), "women's league should be left out"
+    hist = json.loads(gzip.open(os.path.join(site, 'history.json.gz')).read())
+    peru = server.main.synthetic_id('league|espn-per.1')
+    assert sum(1 for r in hist['m'] if r[2] == peru) >= 4, 'ESPN-only league results not in the history'
+    preds = json.load(open(os.path.join(site, 'predictions', f'{key_today}.json')))
+    by_id = {p['id']: p for p in preds['p']}
+    pt = by_id[by_espn['9001']['id']]
+    assert pt['quality'] == 'full' and pt['model']['pool'] == 'national teams', pt.get('model')
+    assert abs(pt['probs']['1'] + pt['probs']['X'] + pt['probs']['2'] - 1) < 2e-3
+    assert pt['xg'][0] > pt['xg'][1], 'Portugal (stronger) should be expected to score more'
+    pe = by_id[by_espn['9005']['id']]
+    assert pe['quality'] == 'cold' and pe['why'][0].startswith('Thin data'), pe
+    assert abs(pe['probs']['O2.5'] + pe['probs']['U2.5'] - 1) < 2e-3
+    m = json.load(open(os.path.join(site, 'manifest.json')))
+    assert 'ESPN' in ' '.join(m.get('sources', [])), m.get('sources')
+    espn_mod.ENABLED = False
 
 
 def math_prod(values):
