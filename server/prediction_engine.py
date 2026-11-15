@@ -24,7 +24,10 @@ for 1 / X / 2 / double chance, and a strong pull (prior 40) for goals
 markets, where single-team totals proved to be mostly noise.
 """
 import math
+import re
 from datetime import datetime, timezone
+
+from .names import is_youth
 
 PARAMS = {
     'half_life_days': 180,
@@ -41,6 +44,15 @@ PARAMS = {
     'venue_prior': 20,
     'threshold': 0.70,
 }
+
+# Human volatility (server 1.10): matches where line-ups, motivation or
+# fatigue make the numbers less reliable. They are flagged everywhere and
+# their confidence is cut by VOLATILITY_PENALTY for the Daily Top 3.
+VOLATILITY_PENALTY = 0.05
+CONGESTION_DAYS = 3        # played less than 3 days before kickoff
+CONGESTION_WINDOW = 8      # or 3+ matches in the 8 days before kickoff
+_CUP = re.compile(r"\b(cup|coupe|copa|pokal|coppa|ta[cç]a|beker|trophy|shield|knock-?out|play-?offs?|"
+                  r"super ?cup|supercopa|carabao)\b", re.I)
 
 # National teams play about 10 matches a year: a longer memory.
 POOL_PARAMS = dict(PARAMS, half_life_days=365, train_days=1460)
@@ -511,6 +523,35 @@ class PredictionEngine:
                 ga += r[6]
         return gf, ga, len(rows)
 
+    def volatility(self, fx, national, cold):
+        """{'flag': bool, 'reasons': [...]}: cup ties, international
+        friendlies, youth/reserve sides, fixture congestion, cold starts."""
+        name = (self.leagues.get(fx['lg']['id']) or fx['lg']).get('name') or fx['lg'].get('name') or ''
+        home, away = fx['h'].get('name') or '', fx['a'].get('name') or ''
+        reasons = []
+        if not national and _CUP.search(name):
+            reasons.append('cup tie')
+        if national and 'friendl' in name.lower():
+            reasons.append('international friendly')
+        if is_youth(home) or is_youth(away) or is_youth('', name):
+            reasons.append('youth/reserve side')
+        for tid in (fx['h']['id'], fx['a']['id']):
+            before = [r[1] for r in self._team_all(tid) if r[1] < fx['ts']]
+            if before and (fx['ts'] - before[-1] < CONGESTION_DAYS * DAY or
+                           sum(1 for t in before if fx['ts'] - t <= CONGESTION_WINDOW * DAY) >= 3):
+                reasons.append('fixture congestion')
+                break
+        if cold:
+            reasons.append('cold-start rating')
+        return {'flag': bool(reasons), 'reasons': reasons}
+
+    def _flag(self, pred, fx, national, cold):
+        v = self.volatility(fx, national, cold)
+        pred['volatility'] = v
+        best = (pred.get('best') or {}).get('probability') or 0.0
+        pred['confidence'] = round(best - (VOLATILITY_PENALTY if v['flag'] else 0.0), 4)
+        return pred
+
     def predict_match(self, fx):
         home, away = fx['h'].get('name') or 'Home', fx['a'].get('name') or 'Away'
         league = self.leagues.get(fx['lg']['id']) or fx['lg']
@@ -583,7 +624,7 @@ class PredictionEngine:
             pred['why'][0] = (f"{home} score {form['home']['for']:.2f} and concede {form['home']['against']:.2f} "
                               f"per game, {away} {form['away']['for']:.2f} and {form['away']['against']:.2f} "
                               f"(last {form['home']['n']} / {form['away']['n']} internationals, friendlies count half).")
-        return pred
+        return self._flag(pred, fx, pool is not None, False)
 
     def _cold_match(self, fx, lg, cutoff, res, neutral, national):
         """Cold start: a team with too few stored matches (or a competition
@@ -622,7 +663,7 @@ class PredictionEngine:
         pred['why'] = explain(home, away, pred)
         pred['why'][0] = (f"Thin data (cold start): {home} has {nh} stored match(es), {away} {na}. "
                           f"GOAL20 leans on {source} and each side's recent results, so trust this less.")
-        return pred
+        return self._flag(pred, fx, national, True)
 
     def _assemble(self, fx, lg, rm, gm, xg_res, xg_goals, form, quality):
         probs = market_probabilities(rm, gm)

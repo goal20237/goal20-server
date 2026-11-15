@@ -8,8 +8,8 @@ time. GOAL20 asks politely (a few requests per run, one per second) and
 never depends on it alone.
 
 Days are kept in data/espn/<YYYYMMDD>.json.gz (committed by full runs), so
-finished days are read once. Women's, youth, university and club-friendly
-competitions are left out.
+finished days are read once. Youth and reserve competitions are included;
+women's, US college and club-friendly competitions are left out.
 """
 import gzip
 import json
@@ -66,15 +66,25 @@ LONG = {'NS': 'Not Started', 'PST': 'Postponed', 'CANC': 'Cancelled', 'ABD': 'Ab
         'HT': 'Halftime', '1H': 'First Half', '2H': 'Second Half', 'ET': 'Extra Time', 'P': 'Penalties',
         'FT': 'Match Finished', 'AET': 'After Extra Time', 'PEN': 'After Penalties', 'AWD': 'Awarded'}
 
-_EXCLUDE = re.compile(r'(\.w\.|\.w$|^w\.|ncaa|friendly_u|club\.friendly|\bu-?\d{2}\b|_u\d{2}|\.u\d{2})', re.I)
-_EXCLUDE_NAME = re.compile(r"(women|femenil|feminin|ladies|liga f\b|under-\d{2}|u-?\d{2}\b|youth|reserves|college|ncaa)", re.I)
+# Left out: women's football, US college football and club friendlies.
+# Youth (U17-U23) and reserve competitions are kept (server 1.9: "all
+# football"); they are rated from thin data and marked as such.
+_EXCLUDE = re.compile(r'(\.w\.|\.w$|^w\.|friendly\.w|ncaa|club\.friendly)', re.I)
+_EXCLUDE_NAME = re.compile(r"(women|femenil|feminin|ladies|liga f\b|college|ncaa)", re.I)
+_YOUTH = re.compile(r'(\bu-?\d{2}\b|_u\d{2}|\.u\d{2}|under-\d{2}|youth|reserve|\bii\b|\bb team)', re.I)
 
 
 def excluded(slug, name=''):
     return bool(_EXCLUDE.search(slug or '')) or bool(_EXCLUDE_NAME.search(name or ''))
 
 
+def is_youth(slug, name=''):
+    return bool(_YOUTH.search(slug or '')) or bool(_YOUTH.search(name or ''))
+
+
 def is_international(slug):
+    if is_youth(slug):
+        return False  # youth national teams are rated apart from senior ones
     return slug in INTL or (slug or '').startswith(('fifa.worldq', 'fifa.wc_q', 'uefa.euroq'))
 
 

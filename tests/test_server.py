@@ -560,7 +560,9 @@ def main():
         assert set(body['tickets']) == {'top3', 'longshot'}, body.get('tickets')
         assert body['tickets']['longshot']['badge'] in ('High-Variance +EV Ticket \u2014 Minimal Stake Only',
                                                         'High-Variance Ticket \u2014 Minimal Stake Only (estimated odds)')
-    assert set(m12['tickets_record']) == {'top3', 'longshot'}, m12.get('tickets_record')
+    assert set(m12['tickets_record']) == {'top3', 'top3_grades', 'top3_legs', 'top3_skipped', 'longshot'}, \
+        m12.get('tickets_record')
+    assert m12['tickets_record']['top3']['headline'] and m12['tickets_record']['top3']['grade'] == 'A'
     assert os.path.exists(os.path.join(tmp, 'data', 'tickets.json')), 'ticket archive not written'
     site_text = ''
     for root, _, names in os.walk(site):
@@ -616,7 +618,12 @@ def espn_parser_checks():
     assert es.status_code({'period': 2, 'type': {'name': 'STATUS_IN_PROGRESS', 'state': 'in'}}) == '2H'
     assert es.status_code({'type': {'name': 'STATUS_POSTPONED', 'state': 'pre'}}) == 'PST'
     assert es.is_international('fifa.worldq.caf') and not es.is_international('eng.1')
-    assert es.excluded('usa.ncaa.m.1') and es.excluded('fifa.friendly_u21') and not es.excluded('uefa.nations')
+    assert es.excluded('usa.ncaa.m.1') and es.excluded('club.friendly') and not es.excluded('uefa.nations')
+    # Youth and reserve football is kept (rated apart from senior teams).
+    assert not es.excluded('fifa.friendly_u21', 'Under-21 International Friendly')
+    assert not es.excluded('uefa.euro_u21_qual', 'UEFA U21 Championship Qualifying')
+    assert es.is_youth('uefa.euro_u21_qual') and not es.is_international('uefa.euro_u21_qual')
+    assert es.excluded('eng.w.1', "English Women's Super League") and es.excluded('fifa.friendly.w')
 
 
 def engine_checks(tmp):
@@ -758,6 +765,19 @@ def engine_checks(tmp):
                              'lg': {'id': 4321, 'name': 'International Friendly'},
                              'h': {'id': 10, 'name': 'Strong'}, 'a': {'id': 1, 'name': 'Weak'}})
     assert pn['xg'][0] < pp['xg'][0], 'a neutral venue removes the home advantage'
+    assert 'international friendly' in pp['volatility']['reasons'] and pp['volatility']['flag']
+    assert abs(pp['confidence'] - (pp['best']['probability'] - 0.05)) < 1e-9
+    # Human variance flags.
+    assert by[1]['volatility'] == {'flag': False, 'reasons': []} and by[1]['confidence'] == by[1]['best']['probability']
+    assert 'cold-start rating' in by[4]['volatility']['reasons']
+    cupfx = {'id': 8, 'ts': kick, 'st': 'NS', 'lg': {'id': 991, 'name': 'Coupe de France'},
+             'h': {'id': 5, 'name': 'Mid A'}, 'a': {'id': 6, 'name': 'Mid B II'}}
+    v = eng.volatility(cupfx, False, False)
+    assert v['flag'] and 'cup tie' in v['reasons'] and 'youth/reserve side' in v['reasons'], v
+    busy = rows + [[mid + 900, kick - 2 * 86400, 77, 2026, 10, 3, 1, 1]]
+    eng4 = pe.PredictionEngine({'m': busy, 'l': hist['l']}, None, lambda *_: None, now=clock['t'])
+    vb = eng4.volatility(fx[0], False, False)
+    assert vb['reasons'] == ['fixture congestion'], vb
     print('Example:', by[1]['home'], '-', by[1]['away'], by[1]['pick'], *by[1]['why'], sep='\n  ')
     # After kickoff the stored prediction is frozen, even if new results arrive.
     rows.append([mid + 1, clock['t'] - 86400 * 2, 77, 2026, 1, 10, 7, 0])
@@ -783,7 +803,7 @@ def ticket_checks(tmp):
         return {'id': i, 'ts': ts or now + 3600 * (i % 9 + 1), 'home': f'H{i}', 'away': f'A{i}', 'st': st,
                 'status': 'PICK', 'probs': probs, 'more': more or {}, 'model': {'evidence': list(ev)}}
 
-    # ---- Daily 3: 78%+, one leg per match, 1.20-1.55 fair odds preferred.
+    # ---- Daily Top 3 (graded): A first, then B, then C, never below 65%.
     preds = [
         pred(1, {'1X': 0.80, 'O1.5': 0.79, '2': 0.20}),
         pred(2, {'X2': 0.82, '1': 0.18}, {'DNB2': 0.81}),
@@ -792,20 +812,63 @@ def ticket_checks(tmp):
         pred(5, {'1X': 0.86, '2': 0.14}, {'DNB1': 0.83}),
         pred(6, {'1X': 0.81, '2': 0.19}, ts=now - 60),          # already started
         pred(7, {'1X': 0.95, '2': 0.05}, ev=(5, 20)),            # thin evidence
-        pred(8, {'1X': 0.70, 'O1.5': 0.77}),                     # below 78%
+        pred(8, {'1X': 0.70, 'O1.5': 0.77}),                     # Grade B: below 78%
     ]
     t = tk.generateDailyTop3(preds, now, 'd')
-    assert t['status'] == 'READY', t
+    assert t['status'] == 'READY' and t['grade'] == 'A', t
+    assert all(l['grade'] == 'A' for l in t['legs']) and t['grades'] == {'A': 3, 'B': 0, 'C': 0}
     assert [(l['id'], l['market']) for l in t['legs']] == [(5, 'DNB1'), (2, 'X2'), (1, '1X')], t['legs']
     assert len({l['id'] for l in t['legs']}) == 3
     assert all(l['probability'] >= 0.78 and 1.20 <= l['fair_odds'] <= 1.55 for l in t['legs'])
     assert abs(t['odds'] - round(1 / 0.83 * 1 / 0.82 * 1 / 0.80, 2)) < 0.02, t['odds']
     assert abs(t['chance'] - (1 - 0.14) * 0.82 * 0.80) < 1e-4, t['chance']  # DNB loses only to an away win
-    # Not enough in the band: the safest legs closest to it fill the slip.
+    assert t['title'] == 'Daily Top 3 Statistical Picks'
+    assert t['subtitle'].startswith('Statistical model edge only') and 'played by humans' in t['subtitle']
+    # Legs outside the 1.20-1.55 band never fill the card; fewer than 3 legs
+    # only when not even 3 matches reach 65%.
     t2 = tk.generate_daily_top3([preds[2], preds[3], pred(9, {'O1.5': 0.95}), pred(10, {'1X': 0.85, '2': 0.15})], now)
-    assert [l['id'] for l in t2['legs']] == [4, 10, 3] and t2['status'] == 'READY', t2['legs']
-    t3 = tk.generate_daily_top3([preds[2], preds[3]], now)
-    assert t3['status'] == 'SKIPPED_LOW_EDGE' and t3['odds'] is None
+    assert [l['id'] for l in t2['legs']] == [4] and t2['status'] == 'PARTIAL' and t2['grade'] == 'A', t2
+    assert 'never goes below' in t2['note'] and abs(t2['odds'] - round(1 / 0.79, 2)) < 0.01
+    t3 = tk.generate_daily_top3([preds[2], pred(9, {'O1.5': 0.95}), pred(11, {'1X': 0.64, '2': 0.36})], now)
+    assert t3['status'] == 'SKIPPED_LOW_EDGE' and t3['odds'] is None and not t3['legs'] and t3['grade'] is None
+    assert t3['note'].startswith('NO TOP TICKET TODAY: Fixtures carry too much human/match volatility')
+    assert '65%' in t3['note']
+    tb = tk.generate_daily_top3([preds[2], pred(9, {'O1.5': 0.95}), preds[7]], now)
+    assert [(l['id'], l['market'], l['grade']) for l in tb['legs']] == [(8, 'O1.5', 'B')], tb['legs']
+    assert tb['status'] == 'PARTIAL' and tb['grade'] == 'B'
+    # Fill order A, B, C; the card's grade is its weakest leg; never below 65%.
+    fill = tk.generate_daily_top3([
+        pred(160, {'1X': 0.66, '2': 0.34}),                       # C
+        pred(161, {'1X': 0.80, '2': 0.20}),                       # A
+        pred(162, {'1X': 0.70, '2': 0.30}),                       # C, stronger
+        pred(163, {'1X': 0.74, '2': 0.26}),                       # B
+        dict(pred(164, {'1X': 0.69, '2': 0.31}), volatility={'flag': True, 'reasons': ['cup tie']}),  # 64%: out
+        pred(165, {'1X': 0.64, '2': 0.36}),                       # below the floor
+    ], now)
+    assert [(l['id'], l['grade']) for l in fill['legs']] == [(161, 'A'), (163, 'B'), (162, 'C')], fill['legs']
+    assert fill['status'] == 'READY' and fill['grade'] == 'C' and fill['grades'] == {'A': 1, 'B': 1, 'C': 1}
+    assert fill['note'].startswith('Grade C card') and all(l['confidence'] >= 0.65 for l in fill['legs'])
+    only_c = tk.generate_daily_top3([pred(160, {'1X': 0.66, '2': 0.34}), pred(162, {'1X': 0.70, '2': 0.30}),
+                                     pred(166, {'O1.5': 0.68})], now)
+    assert only_c['status'] == 'READY' and only_c['grade'] == 'C' and len(only_c['legs']) == 3
+    assert tk.leg_grade(0.78) == 'A' and tk.leg_grade(0.78, flagged=True) == 'B'
+    assert tk.leg_grade(0.83, cold=True) == 'C' and tk.leg_grade(0.7199) == 'C' and tk.leg_grade(0.72) == 'B'
+    assert tk.leg_grade(0.649) is None and tk.leg_grade(None) is None
+    # Tickets archived before server 1.11 are graded from what they stored.
+    assert tk.grade_of({'probability': 0.80}) == 'A'
+    assert tk.grade_of({'probability': 0.83, 'confidence': 0.78, 'volatility': ['cup tie']}) == 'B'
+    assert tk.ticket_grade({'legs': [{'probability': 0.80}, {'probability': 0.81, 'cold': True}]}) == 'C'
+    assert tk.ticket_grade({'legs': []}) is None
+    # Human variance: 5 points off the confidence, never above Grade B.
+    cup = dict(pred(150, {'1X': 0.82, '2': 0.18}), volatility={'flag': True, 'reasons': ['cup tie']})
+    cup_ok = dict(pred(151, {'1X': 0.833, '2': 0.167}), volatility={'flag': True, 'reasons': ['fixture congestion']})
+    tv = tk.generate_daily_top3([cup, cup_ok, pred(152, {'1X': 0.79, '2': 0.21})], now)
+    assert [l['id'] for l in tv['legs']] == [152, 151, 150], tv['legs']  # A first, then B by confidence
+    by_v = {l['id']: l for l in tv['legs']}
+    assert by_v[151]['volatility'] == ['fixture congestion'] and abs(by_v[151]['confidence'] - 0.783) < 1e-9
+    assert by_v[151]['grade'] == 'B' and by_v[150]['grade'] == 'B' and abs(by_v[150]['confidence'] - 0.77) < 1e-9
+    assert by_v[152]['volatility'] == [] and by_v[152]['confidence'] == 0.79 and by_v[152]['grade'] == 'A'
+    assert tv['status'] == 'READY' and tv['grade'] == 'B' and 'higher human variance' in tv['note']
 
     # ---- 1000+ longshot: real prices only, strictly by expected value.
     rnd = random.Random(11)
@@ -890,7 +953,8 @@ def ticket_checks(tmp):
     top2 = tk.generate_daily_top3([pred(140, {'1X': 0.80, '2': 0.2}), pred(141, {'1X': 0.81, '2': 0.19}),
                                    dict(pred(142, {'1X': 0.83, '2': 0.17}), quality='cold')], now)
     assert [l['id'] for l in top2['legs']] == [141, 140, 142] and top2['legs'][2]['cold']
-    assert 'cold-start' in top2['note']
+    assert top2['legs'][2]['grade'] == 'C' and top2['grade'] == 'C'
+    assert top2['legs'][2]['volatility'] == ['cold-start rating'] and 'higher human variance' in top2['note']
 
     # ---- Settling: draw no bet void on a draw, any lost leg loses.
     done = {5: {'result': [1, 1]}, 2: {'result': [0, 2]}, 1: {'result': [2, 0]}}
@@ -918,12 +982,30 @@ def ticket_checks(tmp):
     assert again['top3']['frozen'] and [l['id'] for l in again['top3']['legs']] == [5, 2, 1]
 
     # ---- Record for the Track screen.
+    c_won = tk.settle_ticket(json.loads(json.dumps(only_c)), {160: {'result': [2, 1]}, 162: {'result': [0, 0]},
+                                                              166: {'result': [1, 1]}})
+    assert c_won['result'] == 'WON'
+    b_lost = tk.settle_ticket(json.loads(json.dumps(tv)), {152: {'result': [0, 1]}, 151: {'result': [1, 0]},
+                                                           150: {'result': [3, 0]}})
+    assert b_lost['result'] == 'LOST'
     rec = tk.record({'2030-03-14': {'top3': st}, '2030-03-15': {'top3': lost_t, 'longshot': ls},
-                     '2030-03-16': {'top3': t3}})
+                     '2030-03-16': {'top3': t3}, '2030-03-17': {'top3': c_won}, '2030-03-18': {'top3': b_lost}})
+    # The headline is Grade A only: the C win and the B loss are not in it.
     assert rec['top3']['won'] == 1 and rec['top3']['lost'] == 1 and rec['top3']['skipped'] == 1
+    assert rec['top3']['headline'] and rec['top3']['grade'] == 'A'
     assert abs(rec['top3']['units'] - (st['paid_odds'] - 1 - 1)) < 1e-6, rec['top3']
     assert rec['top3']['recent'][0]['day'] == '2030-03-15', 'newest first'
-    assert rec['longshot']['pending'] == 1
+    gr = rec['top3_grades']
+    assert (gr['A']['won'], gr['A']['lost']) == (1, 1)
+    assert (gr['B']['won'], gr['B']['lost']) == (0, 1) and (gr['C']['won'], gr['C']['lost']) == (1, 0), gr
+    assert gr['C']['recent'][0]['grade'] == 'C' and gr['C']['text'].startswith('Grade C')
+    assert abs(gr['C']['expected_wins'] - only_c['chance']) < 1e-2
+    lg = rec['top3_legs']
+    # Legs by their own grade (the B card's A leg lost, its two B legs won).
+    assert (lg['A']['won'], lg['A']['lost'], lg['A']['void']) == (3, 2, 2), lg
+    assert (lg['B']['won'], lg['B']['lost']) == (2, 0) and (lg['C']['won'], lg['C']['lost']) == (3, 0), lg
+    assert abs(lg['B']['expected'] - (0.833 + 0.82)) < 0.01, lg
+    assert rec['top3_skipped'] == 1 and rec['longshot']['pending'] == 1
 
     # ---- OddsPapi: draw, team totals and BTTS & Over 2.5 never confused with match totals.
     catalogue = [
@@ -1004,6 +1086,7 @@ def espn_scenario(tmp, site, espn_world, intl_csv, server):
                                                state='in', name='STATUS_SECOND_HALF', hs='1', clock="67'",
                                                period=2)),
         ('eng.w.1', '8097', "English Women's Super League", ev(9010, kick, 'Arsenal Women', 'Chelsea Women')),
+        ('uefa.euro_u21_qual', '3920', 'UEFA U21 Championship Qualifying', ev(9011, kick, 'Portugal U21', 'Denmark U21')),
     ]
     for i in range(4):  # finished matches of the league only ESPN covers
         events.append(('per.1', '670', 'Peruvian Liga 1',
@@ -1028,6 +1111,8 @@ def espn_scenario(tmp, site, espn_world, intl_csv, server):
     live = by_espn['9006']
     assert live['st'] == '2H' and live['el'] == 67 and live['hg'] == 1, live
     assert not any('Women' in f['h']['name'] for f in d['f']), "women's league should be left out"
+    u21 = by_espn['9011']
+    assert not u21.get('pool') and u21['h']['id'] != intl_mod.team_id('Portugal'), 'U21 rated with seniors'
     hist = json.loads(gzip.open(os.path.join(site, 'history.json.gz')).read())
     peru = server.main.synthetic_id('league|espn-per.1')
     assert sum(1 for r in hist['m'] if r[2] == peru) >= 4, 'ESPN-only league results not in the history'
@@ -1039,6 +1124,9 @@ def espn_scenario(tmp, site, espn_world, intl_csv, server):
     assert pt['xg'][0] > pt['xg'][1], 'Portugal (stronger) should be expected to score more'
     pe = by_id[by_espn['9005']['id']]
     assert pe['quality'] == 'cold' and pe['why'][0].startswith('Thin data'), pe
+    assert 'cold-start rating' in pe['volatility']['reasons']
+    assert 'youth/reserve side' in by_id[by_espn['9011']['id']]['volatility']['reasons']
+    assert not pt['volatility']['flag'], pt['volatility']
     assert abs(pe['probs']['O2.5'] + pe['probs']['U2.5'] - 1) < 2e-3
     m = json.load(open(os.path.join(site, 'manifest.json')))
     assert 'ESPN' in ' '.join(m.get('sources', [])), m.get('sources')

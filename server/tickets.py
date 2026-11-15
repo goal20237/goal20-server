@@ -1,20 +1,26 @@
-"""GOAL20's two automatic daily tickets (server 1.8), built from the
-predictionEngine's probabilities right after the predictions.
+"""GOAL20's two automatic daily tickets, built from the predictionEngine's
+probabilities right after the predictions.
 
-generate_daily_top3()  "Daily 3 Sure-Shot Picks"
-    Only the safest markets (1X, X2, Over 1.5, draw no bet) at 78.0%+ model
-    probability, one leg per match. GOAL20 prefers legs whose fair odds sit
-    between 1.20 and 1.55 (78% - 83%), so the slip pays something real
-    rather than 1.05; only when fewer than 3 such legs exist does it take the
-    safer ones closest to that band (above 83%, fair odds just under 1.20).
-    Fewer than 3 legs: no ticket (SKIPPED_LOW_EDGE).
+generate_daily_top3()  "Daily Top 3 Statistical Picks" (graded, server 1.11)
+    Only the safest markets (1X, X2, Over 1.5, draw no bet) with a fair price
+    of 1.20 - 1.55, one leg per match. Confidence is the model probability,
+    cut by 5 points for matches with higher human variance (cup ties,
+    international friendlies, youth/reserve sides, fixture congestion,
+    cold-start ratings). Every leg gets a grade:
+        A  78%+ confidence, stable league match, full data
+        B  72%+ confidence (a would-be A with higher variance lands here)
+        C  65%+ confidence, or a thin-data (cold-start) rating
+    The card is filled A first, then B, then C, up to 3 legs, never below
+    65%. The card's grade is its weakest leg. Fewer than 3 legs only when
+    not even 3 matches reach 65% ("NO TOP TICKET TODAY" when none does).
+    Each grade keeps its own record; the headline record is Grade A only.
+    Statistical model edge only - football is played by humans.
 
 generate_high_odds_accumulator(target_odds=1000)  "1000+ Odds Value Longshot"
     Higher-yield markets (1X2, both teams score & Over 2.5, home / away team
-    Over 1.5) that have a REAL bookmaker price. Each leg's expected value is
-    model probability x price - 1; legs are taken strictly in order of that
-    value until the combined price reaches the target (at most 14 legs).
-    A market without a real price is never used: its value cannot be known.
+    Over 1.5) with a REAL bookmaker price first, strictly by expected value
+    (model probability x price - 1), then estimated legs at the model's fair
+    odds if needed, until the combined price reaches the target (max 14).
 
 Both tickets are rebuilt at every run until their first leg kicks off, then
 frozen, and settled from the results like the predictions. GOAL20 never
@@ -27,12 +33,23 @@ from . import config
 from .prediction_engine import settle_leg
 
 TOP3 = {
-    'title': 'Daily 3 Sure-Shot Picks',
+    'title': 'Daily Top 3 Statistical Picks',
+    'subtitle': 'Statistical model edge only — football is played by humans; never guaranteed. Stake responsibly.',
     'markets': ['1X', 'X2', 'O1.5', 'DNB1', 'DNB2'],
     'legs': 3,
-    'min_probability': 0.78,
+    'grades': {'A': 0.78, 'B': 0.72, 'C': 0.65},   # lowest confidence of each grade
+    'floor': 0.65,                                  # never below this
     'fair_band': (1.20, 1.55),
     'min_evidence': 8.0,   # time-weighted league matches per team
+    'volatility_penalty': 0.05,
+    'empty_note': ('NO TOP TICKET TODAY: Fixtures carry too much human/match volatility '
+                   '— no match reaches the 65% Grade C floor.'),
+}
+GRADES = 'ABC'
+GRADE_TEXT = {
+    'A': 'Grade A: 78%+ confidence, stable league match, full data',
+    'B': 'Grade B: 72%+ confidence, or 78%+ with higher human variance',
+    'C': 'Grade C: 65%+ confidence, or a thin-data (cold-start) rating',
 }
 LONGSHOT = {
     'title': '1000+ Odds Value Longshot',
@@ -122,12 +139,56 @@ def _open(pred, now, min_evidence, allow_cold=False):
     return min(ev) >= min_evidence
 
 
+def volatility_reasons(pred):
+    """Why a match carries higher human variance (empty = stable)."""
+    reasons = list((pred.get('volatility') or {}).get('reasons') or [])
+    if is_cold(pred) and 'cold-start rating' not in reasons:
+        reasons.append('cold-start rating')
+    return reasons
+
+
+def leg_grade(confidence, flagged=False, cold=False):
+    """A, B, C or None (below the 65% floor). Grade A needs a stable match
+    with full data; a match with higher human variance is at best B, a
+    cold-start rating at best C."""
+    g = TOP3['grades']
+    if confidence is None or confidence < g['C'] - 1e-9:
+        return None
+    if not flagged and not cold and confidence >= g['A'] - 1e-9:
+        return 'A'
+    if not cold and confidence >= g['B'] - 1e-9:
+        return 'B'
+    return 'C'
+
+
+def grade_of(leg):
+    """A leg's grade; older legs (before server 1.11) are graded from what
+    they stored, with the same rule."""
+    if leg.get('grade') in ('A', 'B', 'C'):
+        return leg['grade']
+    conf = leg.get('confidence')
+    if conf is None:
+        conf = leg.get('probability')
+    return leg_grade(conf, bool(leg.get('volatility')), bool(leg.get('cold'))) or 'C'
+
+
+def ticket_grade(ticket):
+    """A card's grade = its weakest leg (None without legs)."""
+    legs = (ticket or {}).get('legs') or []
+    if not legs:
+        return None
+    if ticket.get('grade') in ('A', 'B', 'C'):
+        return ticket['grade']
+    return max((grade_of(l) for l in legs), key=GRADES.index)
+
+
 def _leg(pred, market, p, odds, **extra):
     leg = {
         'id': pred['id'], 'ts': pred['ts'], 'home': pred.get('home', ''), 'away': pred.get('away', ''),
         'market': market, 'label': label(market, pred.get('home', ''), pred.get('away', '')),
         'probability': round(p, 4), 'fair_odds': round(1 / p, 2), 'odds': round(odds, 2),
         'lose': round(lose_chance(pred, market) or 0.0, 4), 'status': 'pending',
+        'volatility': volatility_reasons(pred),
     }
     leg.update(extra)
     return leg
@@ -143,49 +204,68 @@ def _product(values):
 # ------------------------------------------------------------ the builders
 
 def generate_daily_top3(preds, now, day=''):
-    """Daily 3 Sure-Shot Picks for one day's predictions."""
+    """Daily Top 3 Statistical Picks for one day's predictions: Grade A legs
+    first, then B, then C, never below 65%, one leg per match."""
     lo, hi = TOP3['fair_band']
     ranked = []
     for pred in preds:
         if not _open(pred, now, TOP3['min_evidence'], allow_cold=True):
             continue
+        reasons = volatility_reasons(pred)
         cold = is_cold(pred)
+        penalty = TOP3['volatility_penalty'] if reasons else 0.0
         best = None
         for m in TOP3['markets']:
             p = probability(pred, m)
-            if p is None or p < TOP3['min_probability'] - 1e-12:
+            if p is None or p <= 0 or not lo - 1e-9 <= 1 / p <= hi + 1e-9:
                 continue
-            in_band = lo - 1e-9 <= 1 / p <= hi + 1e-9
-            # In the band: the highest probability first. Above it (fair odds
-            # under 1.20): the one closest to the band first.
-            key = (0, -p) if in_band else (1, p)
-            if best is None or key < best[0]:
-                best = (key, m, p)
+            conf = p - penalty
+            if conf < TOP3['floor'] - 1e-9:
+                continue
+            if best is None or conf > best[0]:
+                best = (conf, m, p)
         if best:
-            # Teams with full data always come before cold-start ratings.
-            ranked.append(((1 if cold else 0,) + best[0], pred['ts'], pred['id'],
-                           _leg(pred, best[1], best[2], 1 / best[2], in_band=best[0][0] == 0, cold=cold)))
-    ranked.sort(key=lambda r: r[:3])
-    legs = [r[3] for r in ranked[:TOP3['legs']]]
+            conf, m, p = best
+            grade = leg_grade(conf, bool(reasons), cold)
+            ranked.append((GRADES.index(grade), -conf, pred['ts'], pred['id'],
+                           _leg(pred, m, p, 1 / p, confidence=round(conf, 4), in_band=True,
+                                cold=cold, grade=grade)))
+    ranked.sort(key=lambda r: r[:4])
+    legs = [r[4] for r in ranked[:TOP3['legs']]]
+    legs.sort(key=lambda l: (GRADES.index(l['grade']), -l['confidence'], l['ts'], l['id']))
+    g = TOP3['grades']
     ticket = {
-        'kind': 'top3', 'title': TOP3['title'], 'day': day, 'badge': None, 'built': int(now),
-        'odds_kind': 'fair', 'legs': legs,
-        'rules': (f"1X, X2, Over 1.5 or draw no bet at {TOP3['min_probability']:.0%}+, one leg per match, "
-                  f"fair odds {lo:.2f}-{hi:.2f} preferred"),
+        'kind': 'top3', 'title': TOP3['title'], 'subtitle': TOP3['subtitle'], 'day': day, 'badge': None,
+        'built': int(now), 'odds_kind': 'fair', 'legs': legs,
+        'grade': ticket_grade({'legs': legs}),
+        'grades': {k: sum(1 for l in legs if l['grade'] == k) for k in GRADES},
+        'rules': (f"1X, X2, Over 1.5 or draw no bet, fair odds {lo:.2f}-{hi:.2f}, one leg per match; "
+                  f"Grade A first ({g['A']:.0%}+ confidence, stable league match, full data), then B "
+                  f"({g['B']:.0%}+, or {g['A']:.0%}+ with higher human variance), then C ({g['C']:.0%}+, "
+                  f"or thin data); never below {TOP3['floor']:.0%}; confidence = model probability, "
+                  f"{TOP3['volatility_penalty'] * 100:.0f} points off for higher human variance; "
+                  f"the card's grade is its weakest leg"),
     }
-    if len(legs) < TOP3['legs']:
-        ticket['legs'] = []
+    if not legs:
         ticket['status'] = 'SKIPPED_LOW_EDGE'
-        ticket['note'] = (f"Only {len(legs)} match(es) reach {TOP3['min_probability']:.0%} on a safe market "
-                          f"with enough data: no Daily 3 today.")
+        ticket['note'] = TOP3['empty_note']
         return _totals(ticket)
-    ticket['status'] = 'READY'
-    in_band = sum(1 for l in legs if l.get('in_band'))
-    ticket['note'] = ('All 3 legs in the 1.20-1.55 fair-odds band.' if in_band == 3 else
-                      f'{in_band} of 3 legs in the 1.20-1.55 band; the others are safer (fair odds under 1.20).')
-    cold = sum(1 for l in legs if l.get('cold'))
-    if cold:
-        ticket['note'] += f' {cold} leg(s) use a cold-start rating (thin data): trust them less.'
+    grade = ticket['grade']
+    ticket['status'] = 'READY' if len(legs) == TOP3['legs'] else 'PARTIAL'
+    if ticket['status'] == 'READY':
+        ticket['note'] = {
+            'A': 'Grade A card: all 3 legs at 78%+ confidence on stable, full-data matches.',
+            'B': 'Grade B card: its weakest leg is Grade B (72-78%, or 78%+ with higher human variance).',
+            'C': 'Grade C card: its weakest leg is Grade C (65-72%, or thin data). Expect it to lose more often.',
+        }[grade]
+    else:
+        ticket['note'] = (f"Grade {grade} card with {len(legs)} leg{'s' if len(legs) > 1 else ''}: only "
+                          f"{len(legs)} match{'es' if len(legs) > 1 else ''} reach the {TOP3['floor']:.0%} floor "
+                          f"today. GOAL20 never goes below it.")
+    shaky = sum(1 for l in legs if l['volatility'])
+    if shaky:
+        ticket['note'] += (f' {shaky} leg(s) carry higher human variance: confidence cut by '
+                           f"{TOP3['volatility_penalty'] * 100:.0f} points, never above Grade B.")
     return _totals(ticket)
 
 
@@ -367,42 +447,82 @@ def save_archive(archive, path=ARCHIVE):
         f.write(text)
 
 
+def _tally(entries, odds_basis):
+    """won / lost / units / expected wins for (day, ticket) entries."""
+    won = lost = void = pending = 0
+    units = chance = 0.0
+    recent = []
+    for day, t in entries:
+        res = t.get('result')
+        if res == 'WON':
+            won += 1
+            units += (t.get('paid_odds') or t.get('odds') or 1) - 1
+            chance += t.get('chance') or 0
+        elif res == 'LOST':
+            lost += 1
+            units -= 1
+            chance += t.get('chance') or 0
+        elif res == 'VOID':
+            void += 1
+        else:
+            pending += 1
+        item = {'day': day, 'result': res, 'odds': t.get('odds'), 'legs': len(t['legs']),
+                'won_legs': sum(1 for l in t['legs'] if l.get('status') == 'won')}
+        if t.get('kind', 'top3') == 'top3':
+            item['grade'] = ticket_grade(t)
+        recent.append(item)
+    settled = won + lost
+    return {
+        'won': won, 'lost': lost, 'void': void, 'pending': pending,
+        'units': round(units, 2), 'expected_wins': round(chance, 2) if settled else 0,
+        'odds_basis': odds_basis, 'recent': recent[-14:][::-1],
+    }
+
+
 def record(archive):
-    """Results of the settled tickets, for the app's Track screen. Top 3 is
-    counted at fair odds (bookmakers pay less); the longshot at the listed
-    real prices."""
-    out = {}
-    for kind in ('top3', 'longshot'):
-        won = lost = void = pending = skipped = 0
-        units = chance = 0.0
-        recent = []
-        for day in sorted(archive):
-            t = (archive[day] or {}).get(kind)
-            if not t:
-                continue
-            res = t.get('result')
+    """Results of the settled tickets, for the app's Track screen.
+
+    top3         the Grade A record only (the headline; older apps show it)
+    top3_grades  one separate record per card grade: A, B and C are never
+                 added together
+    top3_legs    every Daily Top 3 leg by its own grade: won, lost and the
+                 number the model expected
+    longshot     the 1000+ longshot
+    Top 3 is counted at fair odds (bookmakers pay less); the longshot at the
+    listed prices."""
+    by_grade = {g: [] for g in GRADES}
+    legs = {g: {'won': 0, 'lost': 0, 'void': 0, 'expected': 0.0} for g in GRADES}
+    skipped = 0
+    longshot, ls_skipped = [], 0
+    for day in sorted(archive):
+        t = (archive[day] or {}).get('top3')
+        if t:
             if t.get('status') == 'SKIPPED_LOW_EDGE' or not t.get('legs'):
                 skipped += 1
-                continue
-            if res == 'WON':
-                won += 1
-                units += (t.get('paid_odds') or t.get('odds') or 1) - 1
-                chance += t.get('chance') or 0
-            elif res == 'LOST':
-                lost += 1
-                units -= 1
-                chance += t.get('chance') or 0
-            elif res == 'VOID':
-                void += 1
             else:
-                pending += 1
-            recent.append({'day': day, 'result': res, 'odds': t.get('odds'), 'legs': len(t['legs']),
-                           'won_legs': sum(1 for l in t['legs'] if l.get('status') == 'won')})
-        settled = won + lost
-        out[kind] = {
-            'won': won, 'lost': lost, 'void': void, 'pending': pending, 'skipped': skipped,
-            'units': round(units, 2), 'expected_wins': round(chance, 2) if settled else 0,
-            'odds_basis': 'fair odds' if kind == 'top3' else 'listed prices',
-            'recent': recent[-14:][::-1],
-        }
-    return out
+                by_grade[ticket_grade(t)].append((day, t))
+                for l in t['legs']:
+                    row = legs[grade_of(l)]
+                    if l.get('status') in ('won', 'lost'):
+                        row[l['status']] += 1
+                        row['expected'] += 1 - (l.get('lose') or 0)
+                    elif l.get('status') == 'void':
+                        row['void'] += 1
+        t = (archive[day] or {}).get('longshot')
+        if t:
+            if t.get('status') == 'SKIPPED_LOW_EDGE' or not t.get('legs'):
+                ls_skipped += 1
+            else:
+                longshot.append((day, t))
+    grades = {}
+    for g in GRADES:
+        grades[g] = dict(_tally(by_grade[g], 'fair odds'), grade=g, text=GRADE_TEXT[g])
+    for row in legs.values():
+        row['expected'] = round(row['expected'], 2)
+    return {
+        'top3': dict(grades['A'], headline=True, skipped=skipped),
+        'top3_grades': grades,
+        'top3_legs': legs,
+        'top3_skipped': skipped,
+        'longshot': dict(_tally(longshot, 'listed prices'), skipped=ls_skipped),
+    }

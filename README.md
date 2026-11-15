@@ -115,12 +115,19 @@ From then on, the app syncs every time it opens.
   `SKIPPED_LOW_EDGE`, with 3 plain-language bullets. A prediction is frozen at
   kickoff.
 - **Daily tickets (server 1.8).** `server/tickets.py` adds two tickets to each
-  predictions file: **Daily 3 Sure-Shot Picks** (1X, X2, Over 1.5 or draw no
-  bet at 78%+, one leg per match, fair odds 1.20-1.55 preferred) and the
+  predictions file: **Daily Top 3 Statistical Picks** (server 1.11: 1X, X2,
+  Over 1.5 or draw no bet, fair odds 1.20-1.55, one leg per match, graded
+  A = 78%+ on a stable full-data match, B = 72%+ or a would-be A with higher
+  human variance, C = 65%+ or a cold start; filled A, then B, then C, never
+  below 65%; the card's grade is its weakest leg; 5 points off the confidence
+  for cup ties, friendlies, youth sides, congestion and cold starts) and the
   **1000+ Odds Value Longshot** (1X2, BTTS & Over 2.5, team Over 1.5 with a
   real price, legs strictly by value = probability x price - 1, up to 14
   legs). Both are frozen at their first kickoff, settled, and archived in
-  `data/tickets.json`; the manifest's `tickets_record` holds the results.
+  `data/tickets.json`; the manifest's `tickets_record` holds the results:
+  `top3` = the Grade A record (headline), `top3_grades` = one record per
+  card grade (never added together), `top3_legs` = every leg by its own
+  grade against the model's expectation.
 
 ### Where the keys go
 
@@ -135,7 +142,8 @@ From then on, the app syncs every time it opens.
 ## Worldwide coverage (server 1.9)
 
 - **ESPN scoreboard** (free, keyless, unofficial): national teams and about
-  60 club leagues, one request per day; days kept in `data/espn/`. Full runs
+  60 club leagues, youth and reserve competitions included, one request per
+  day; days kept in `data/espn/`. Full runs
   also fill in up to 150 past days (40 per run) for competitions only ESPN
   covers. Set `GOAL20_ESPN=0` to switch it off.
 - **International results** (martj42, public domain, read once a day): the
@@ -159,7 +167,7 @@ server/main.py        the run (full / quick)
 server/data_fetcher.py football-data.org fetcher: 6-hour, 4-a-day anti-ban gate
 server/cache.py       SQLite cache (responses, cycles, ratings, frozen predictions)
 server/prediction_engine.py Dixon-Coles + bivariate Poisson, 70% filter, bullets
-server/tickets.py     Daily 3 Sure-Shot Picks and the 1000+ Odds Value Longshot
+server/tickets.py     Daily Top 3 Statistical Picks (graded A/B/C) and the 1000+ Odds Value Longshot
 server/espn.py        ESPN worldwide scoreboard (national teams, ~60 leagues)
 server/internationals.py national-team results and ratings pool
 server/apifootball.py API-Football client: quota guard, plan-limit detection

@@ -1210,7 +1210,7 @@ def make_predictions(history, cache, intl_rows=()):
 
 
 def make_tickets(predictions, enrich, cache):
-    """Daily 3 Sure-Shot Picks and the 1000+ Odds Value Longshot for every
+    """Daily Top 3 Statistical Picks (graded A/B/C) and the 1000+ Odds Value Longshot for every
     published day, frozen at their first kickoff, settled, archived in
     data/tickets.json. Returns the record shown on the app's Track screen."""
     odds = merged_enrich(enrich)['odds']
@@ -1242,7 +1242,8 @@ def make_tickets(predictions, enrich, cache):
     for k in (today,):
         t = (predictions.get(k) or {}).get('tickets') or {}
         top, lng = t.get('top3') or {}, t.get('longshot') or {}
-        log(f"Tickets {k}: Daily 3 {top.get('status')} (odds {top.get('odds')}), "
+        log(f"Tickets {k}: Daily Top 3 {top.get('status')} grade {top.get('grade') or '-'} "
+            f"({len(top.get('legs') or [])} legs, odds {top.get('odds')}), "
             f"Longshot {lng.get('status')} ({len(lng.get('legs') or [])} legs, odds {lng.get('odds')})")
     return tickets.record(archive)
 
