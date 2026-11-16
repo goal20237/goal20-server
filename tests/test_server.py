@@ -817,6 +817,11 @@ def ticket_checks(tmp):
     import server.oddspapi as op
     import server.tickets as tk
     now = 1_900_000_000
+    # The original rule tests below predate server 1.13 (bookmaker check, Grade A limits);
+    # they run with those switched off. new_rule_checks() tests the real rules.
+    saved = dict(tk.TOP3)
+    tk.TOP3.update(a_needs_price=False, unverified_penalty=0.0, cold_penalty=0.0,
+                   grade_a_markets=['1X', 'X2', 'O1.5', 'DNB1', 'DNB2'])
 
     def pred(i, probs, more=None, ts=None, ev=(12, 12), st='NS'):
         return {'id': i, 'ts': ts or now + 3600 * (i % 9 + 1), 'home': f'H{i}', 'away': f'A{i}', 'st': st,
@@ -1094,6 +1099,61 @@ def ticket_checks(tmp):
     assert mm == {'1': 'home', '2': 'draw', '3': 'away', '10': 'over15', '20': 'home_o15',
                   '30': 'away_o15', '40': 'btts_o25', '50': 'btts'}, mm
 
+
+    # ---- Server 1.13 rules (restored): bookmaker check, Grade A limits, stake units.
+    tk.TOP3.clear()
+    tk.TOP3.update(saved)
+
+    def q(h, d, a, over=None):
+        v = [{'b': 'betPawa', 'm': 'home', 'o': h}, {'b': 'betPawa', 'm': 'draw', 'o': d},
+             {'b': 'betPawa', 'm': 'away', 'o': a}]
+        if over:
+            v.append({'b': 'betPawa', 'm': 'over15', 'o': over})
+        return {'v': v}
+
+    mk = lambda i, probs, **kw: pred(i, probs, **kw)
+    # price agrees: 1X model 0.85, bookmaker 1/1.20 and draw 6.0 => market 1X about 0.82
+    agree = mk(301, {'1X': 0.82, '2': 0.18})
+    px = {'301': q(1.7, 3.8, 5.0)}
+    mp = tk.market_probability(px['301']['v'], '1X')
+    assert 0.78 < mp < 0.84, mp
+    t = tk.generate_daily_top3([agree], now, 'd', px)
+    leg = t['legs'][0]
+    assert leg['price_check'] == 'verified' and leg['grade'] == 'A' and abs(leg['probability'] - (0.4 * 0.82 + 0.6 * mp)) < 1e-3
+    assert t['stake_units'] == 2.0 and '1u = 1%' in t['stake_text']
+    # the bookmaker disagrees by 10+ points (the Nacional Potosi case): the leg is refused
+    bad = mk(302, {'1X': 0.92, '2': 0.08})
+    pb = {'302': q(2.0, 3.3, 3.6)}                     # market 1X about 0.64
+    assert tk.market_probability(pb['302']['v'], '1X') < 0.78
+    tb = tk.generate_daily_top3([bad], now, 'd', pb)
+    assert not tb['legs'], tb['legs']
+    # no price: never Grade A, 3 points off
+    tn = tk.generate_daily_top3([mk(303, {'1X': 0.85, '2': 0.15})], now, 'd', {})
+    ln = tn['legs'][0]
+    assert ln['price_check'] == 'unverified' and ln['grade'] == 'B' and abs(ln['probability'] - 0.82) < 1e-6
+    # X2 (away side) is never Grade A, even with a price that agrees
+    ax = mk(304, {'X2': 0.80, '1': 0.20})
+    tx = tk.generate_daily_top3([ax], now, 'd', {'304': q(4.5, 3.8, 1.75)})
+    assert tx['legs'][0]['market'] == 'X2' and tx['legs'][0]['grade'] == 'B'
+    # never more than 3 legs, no BTTS / away win in a Top 3
+    many = [mk(310 + i, {'1X': 0.84, '2': 0.16, 'BTTS_YES': 0.9, 'O1.5': 0.85}) for i in range(8)]
+    tm = tk.generate_daily_top3(many, now, 'd', {})
+    assert len(tm['legs']) <= 3 and all(l['market'] in ('1X', 'X2', 'O1.5', 'DNB1', 'DNB2') for l in tm['legs'])
+    # cold start: 4 points off
+    cold = dict(mk(320, {'1X': 0.86, '2': 0.14}), quality='cold')
+    tc = tk.generate_daily_top3([cold], now, 'd', {})
+    assert tc['legs'][0]['grade'] == 'C' and tc['stake_units'] == 0.5
+    # the longshot is a lottery ticket with a tiny stake
+    lsx = [pred(330 + i, {'1': 0.35, 'X': 0.3, '2': 0.35}) for i in range(14)]
+    lt = tk.generate_high_odds_accumulator(lsx, {}, now, 'd')
+    if lt['legs']:
+        assert lt['stake_units'] == 0.25 and lt['chance_in'] > 100 and 'Lottery ticket' in lt['stake_text']
+    # derby detection and goal cap
+    import server.prediction_engine as pe2
+    assert pe2.is_derby('Nacional Potosi', 'Real Potosi') and pe2.is_derby('Sheffield United', 'Sheffield Wednesday')
+    assert not pe2.is_derby('Real Madrid', 'Real Sociedad') and not pe2.is_derby('Barcelona', 'Real Madrid')
+    assert pe2.MAX_TEAM_GOALS == 3.5 and pe2.PARAMS['prior_result'] == 12
+    print('Server 1.13 rules OK')
 
 def espn_scenario(tmp, site, espn_world, intl_csv, server):
     import server.espn as espn_mod

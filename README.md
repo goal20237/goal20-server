@@ -184,3 +184,6 @@ data/                 stored days, team-name map, checks (saved by the bot)
 .github/workflows/    the schedule
 tests/test_server.py  offline end-to-end test:  python tests/test_server.py
 ```
+
+## 1.13.0
+Bookmaker check on every Daily Top 3 / longshot leg (model more than 10 points above the price: refused), 40/60 model-bookmaker blend, rating prior 12, goal cap 3.5, same-city derby handling, Grade A rules (price agrees; 1X, Over 1.5, DNB 1 only), suggested stake units on every ticket, longshot "1 chance in N".

@@ -32,7 +32,7 @@ from .names import is_youth
 PARAMS = {
     'half_life_days': 180,
     'train_days': 450,
-    'prior_result': 6,
+    'prior_result': 12,   # was 6; backtest (8,329 matches): 12 fixes thin-data overconfidence
     'prior_goals': 40,
     'shots_weight': 0.5,
     'min_league_matches': 40,
@@ -49,6 +49,25 @@ PARAMS = {
 # fatigue make the numbers less reliable. They are flagged everywhere and
 # their confidence is cut by VOLATILITY_PENALTY for the Daily Top 3.
 VOLATILITY_PENALTY = 0.05
+MAX_TEAM_GOALS = 3.5      # no side is expected to score more than this (3.94 was an error)
+_GENERIC = {'real', 'club', 'deportivo', 'sporting', 'athletic', 'atletico', 'atlético', 'united', 'city', 'town',
+            'inter', 'dynamo', 'dinamo', 'sport', 'rovers', 'wanderers', 'albion', 'fc', 'cf', 'sc', 'ac', 'as',
+            'ud', 'cd', 'sd', 'rc', 'afc', 'borough', 'athletico', 'olympic', 'olympique', 'nacional',
+            'internacional', 'union', 'unión', 'racing', 'juventud', 'academico', 'universidad'}
+
+
+def is_derby(home, away):
+    """Two clubs that share a place name (Nacional Potosi v Real Potosi,
+    Sheffield United v Sheffield Wednesday): same city, often the same
+    ground, so no real home advantage. Matched on a shared distinctive word."""
+    def words(n):
+        out = set()
+        for w in re.split(r"[\s\-\.']+", (n or '').lower()):
+            w = w.strip()
+            if len(w) >= 5 and w not in _GENERIC and not w.isdigit():
+                out.add(w)
+        return out
+    return bool(words(home) & words(away))
 CONGESTION_DAYS = 3        # played less than 3 days before kickoff
 CONGESTION_WINDOW = 8      # or 3+ matches in the 8 days before kickoff
 _CUP = re.compile(r"\b(cup|coupe|copa|pokal|coppa|ta[cç]a|beker|trophy|shield|knock-?out|play-?offs?|"
@@ -541,6 +560,8 @@ class PredictionEngine:
                            sum(1 for t in before if fx['ts'] - t <= CONGESTION_WINDOW * DAY) >= 3):
                 reasons.append('fixture congestion')
                 break
+        if not national and is_derby(home, away):
+            reasons.append('same-city derby')
         if cold:
             reasons.append('cold-start rating')
         return {'flag': bool(reasons), 'reasons': reasons}
@@ -566,7 +587,8 @@ class PredictionEngine:
         res = self._fit(lg, cutoff, PARAMS['prior_result'])
         gls = self._fit(lg, cutoff, PARAMS['prior_goals']) if res else None
         h, a = fx['h']['id'], fx['a']['id']
-        neutral = bool(fx.get('neutral'))
+        derby = pool is None and is_derby(home, away)
+        neutral = bool(fx.get('neutral')) or derby
         if not res or not gls or not (Ratings(res).covers(h) and Ratings(res).covers(a)):
             return self._cold_match(fx, lg, cutoff, res, neutral, pool is not None)
         R, G = Ratings(res), Ratings(gls)
@@ -600,12 +622,15 @@ class PredictionEngine:
                              'against': round(aa_ / na_, 2) if na_ else 0.0},
                     'any_venue': True}
         adj_h, adj_a = math.sqrt(vhA * vaD), math.sqrt(vaA * vhD)
+        if derby:
+            adj_h = 1 + (adj_h - 1) * 0.5   # shared ground: venue form counts half
+            adj_a = 1 + (adj_a - 1) * 0.5
 
         def lambdas(F, fit):
             sh, sa = (math.sqrt(fit['hl'] * fit['al']),) * 2 if neutral else (fit['hl'], fit['al'])
             lh = F.att(h) * F.de(a) * sh * adj_h
             la = F.att(a) * F.de(h) * sa * adj_a
-            return min(6.0, max(0.05, lh)), min(6.0, max(0.05, la))
+            return min(MAX_TEAM_GOALS, max(0.05, lh)), min(MAX_TEAM_GOALS, max(0.05, la))
 
         rlh, rla = lambdas(R, res)
         glh, gla = lambdas(G, gls)
@@ -624,6 +649,7 @@ class PredictionEngine:
             pred['why'][0] = (f"{home} score {form['home']['for']:.2f} and concede {form['home']['against']:.2f} "
                               f"per game, {away} {form['away']['for']:.2f} and {form['away']['against']:.2f} "
                               f"(last {form['home']['n']} / {form['away']['n']} internationals, friendlies count half).")
+        pred['derby'] = derby
         return self._flag(pred, fx, pool is not None, False)
 
     def _cold_match(self, fx, lg, cutoff, res, neutral, national):

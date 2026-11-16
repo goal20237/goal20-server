@@ -46,10 +46,20 @@ TOP3 = {
     'fair_band': (1.20, 1.55),
     'min_evidence': 8.0,   # time-weighted league matches per team
     'volatility_penalty': 0.05,
+    'w_model': 0.4,        # backtest: the bookmaker price carries more weight than the model
+    'max_gap': 0.10,       # model more than 10 points above the bookmaker: leg refused (bookmaker was right)
+    'a_needs_price': True,        # Grade A needs a bookmaker price that agrees with the model
+    'unverified_penalty': 0.03,   # no bookmaker price to check against
+    'cold_penalty': 0.04,         # thin-data (cold start) ratings were 3-4 points over-confident
+    'grade_a_markets': ['1X', 'O1.5', 'DNB1'],   # X2 (away side) and BTTS never Grade A
+    'stake': {'A': 2.0, 'B': 1.0, 'C': 0.5},     # suggested units; 1u = 1% of your bankroll
+    'overround_one_sided': 1.05,
     'empty_note': ('NO TOP TICKET TODAY: Fixtures carry too much human/match volatility '
                    '— no match reaches the 65% Grade C floor.'),
 }
 GRADES = 'ABC'
+STAKE_TEXT = '1u = 1% of your betting bankroll. Never stake more than the suggested units.'
+LONGSHOT_STAKE = 0.25
 GRADE_TEXT = {
     'A': 'Grade A: 78%+ confidence, stable league match, full data',
     'B': 'Grade B: 72%+ confidence, or 78%+ with higher human variance',
@@ -127,6 +137,44 @@ def price_for(quotes, key):
             return float(q['o']), 'market average'
     q = min(found, key=lambda x: x['o'])
     return float(q['o']), (q.get('b') or 'bookmaker').replace(' (football-data)', '')
+
+
+def market_probability(quotes, market):
+    """The bookmaker's own chance for a market (overround removed) from the
+    published 1X2 prices, or None. Over 1.5 has only one side priced, so a
+    flat margin is removed. Draw no bet uses the two sides."""
+    def q(key):
+        v, _ = price_for(quotes, key)
+        return v
+    h, d, a = q('home'), q('draw'), q('away')
+    if market in ('1', 'X', '2', '1X', 'X2', '12', 'DNB1', 'DNB2'):
+        if not (h and d and a):
+            return None
+        tot = 1 / h + 1 / d + 1 / a
+        ph, pd_, pa = 1 / h / tot, 1 / d / tot, 1 / a / tot
+        return {'1': ph, 'X': pd_, '2': pa, '1X': ph + pd_, 'X2': pa + pd_, '12': ph + pa,
+                'DNB1': ph / (ph + pa), 'DNB2': pa / (ph + pa)}[market]
+    if market == 'O1.5':
+        o = q('over15')
+        return (1 / o) / TOP3['overround_one_sided'] if o else None
+    return None
+
+
+def checked_probability(pred, market, quotes):
+    """(probability to use, status, market probability). status: 'verified'
+    (model and bookmaker within 10 points: blended 40/60), 'refused' (model
+    10+ points above the bookmaker: the backtest says the bookmaker wins
+    those) or 'unverified' (no price: model less a small penalty)."""
+    p = probability(pred, market)
+    if p is None:
+        return None, 'none', None
+    mp = market_probability(quotes, market)
+    if mp is None:
+        return max(0.0, p - TOP3['unverified_penalty']), 'unverified', None
+    if p - mp > TOP3['max_gap']:
+        return p, 'refused', mp
+    w = TOP3['w_model']
+    return w * p + (1 - w) * mp, 'verified', mp
 
 
 def is_cold(pred):
@@ -210,7 +258,7 @@ def _product(values):
 
 # ------------------------------------------------------------ the builders
 
-def generate_daily_top3(preds, now, day=''):
+def generate_daily_top3(preds, now, day='', odds=None):
     """Daily Top 3 Statistical Picks for one day's predictions: Grade A legs
     first, then B, then C, never below 65%, one leg per match."""
     lo, hi = TOP3['fair_band']
@@ -222,21 +270,26 @@ def generate_daily_top3(preds, now, day=''):
         cold = is_cold(pred)
         penalty = TOP3['volatility_penalty'] if reasons else 0.0
         best = None
+        quotes = ((odds or {}).get(str(pred['id'])) or {}).get('v') or []
         for m in TOP3['markets']:
-            p = probability(pred, m)
-            if p is None or p <= 0 or not lo - 1e-9 <= 1 / p <= hi + 1e-9:
+            p, status, mp = checked_probability(pred, m, quotes)
+            if p is None or p <= 0 or status == 'refused' or not lo - 1e-9 <= 1 / p <= hi + 1e-9:
                 continue
-            conf = p - penalty
+            conf = p - penalty - (TOP3['cold_penalty'] if cold else 0.0)
             if conf < TOP3['floor'] - 1e-9:
                 continue
             if best is None or conf > best[0]:
-                best = (conf, m, p)
+                best = (conf, m, p, status, mp)
         if best:
-            conf, m, p = best
+            conf, m, p, status, mp = best
             grade = leg_grade(conf, bool(reasons), cold)
+            if grade == 'A' and ((TOP3['a_needs_price'] and status != 'verified') or m not in TOP3['grade_a_markets']):
+                grade = 'B'     # Grade A needs a bookmaker price that agrees, and a safe market
             ranked.append((GRADES.index(grade), -conf, pred['ts'], pred['id'],
                            _leg(pred, m, p, 1 / p, confidence=round(conf, 4), in_band=True,
-                                cold=cold, grade=grade)))
+                                cold=cold, grade=grade, price_check=status,
+                                market_prob=None if mp is None else round(mp, 4),
+                                model_prob=round(probability(pred, m), 4))))
     ranked.sort(key=lambda r: r[:4])
     legs = [r[4] for r in ranked[:TOP3['legs']]]
     legs.sort(key=lambda l: (GRADES.index(l['grade']), -l['confidence'], l['ts'], l['id']))
@@ -258,6 +311,8 @@ def generate_daily_top3(preds, now, day=''):
         ticket['note'] = TOP3['empty_note']
         return _totals(ticket)
     grade = ticket['grade']
+    ticket['stake_units'] = TOP3['stake'][grade]
+    ticket['stake_text'] = f"Suggested stake: {TOP3['stake'][grade]:g}u max. {STAKE_TEXT}"
     ticket['status'] = 'READY' if len(legs) == TOP3['legs'] else 'PARTIAL'
     if ticket['status'] == 'READY':
         ticket['note'] = {
@@ -299,10 +354,13 @@ def generate_high_odds_accumulator(preds, odds, now, day='', target_odds=LONGSHO
             if p is None or p <= 0:
                 continue
             price, source = price_for(quotes, PRICE_KEY[m])
+            mp = market_probability(quotes, m)
             if price is not None:
                 priced += 1
                 edge = p * price - 1
-                if (not cold and p >= LONGSHOT['min_probability'] and price >= LONGSHOT['min_price']
+                if mp is not None and p - mp > TOP3['max_gap']:
+                    pass    # the bookmaker disagrees by 10+ points: the 'value' is the model's mistake
+                elif (not cold and p >= LONGSHOT['min_probability'] and price >= LONGSHOT['min_price']
                         and LONGSHOT['min_edge'] <= edge <= LONGSHOT['max_edge']):
                     if best is None or edge > best[0]:
                         best = (edge, m, p, price, source)
@@ -350,6 +408,12 @@ def generate_high_odds_accumulator(preds, odds, now, day='', target_odds=LONGSHO
     else:
         ticket['status'] = 'BELOW_TARGET'
         ticket['note'] = f'All {len(legs)} usable legs give {total:,.0f}, short of {target_odds:,.0f}.'
+    if ticket['legs']:
+        chance = _product(l['probability'] for l in ticket['legs'])
+        ticket['chance_in'] = int(round(1 / chance)) if chance > 0 else None
+        ticket['stake_units'] = LONGSHOT_STAKE
+        ticket['stake_text'] = (f"Lottery ticket: about 1 chance in {ticket['chance_in']:,} on GOAL20's own "
+                                f"numbers. Stake {LONGSHOT_STAKE:g}u at most. {STAKE_TEXT}")
     if estimated and ticket['legs']:
         ticket['note'] += (f" {estimated} of {len(legs)} legs have no real price: their odds are GOAL20's fair "
                            f"odds (no proven value), and your bookmaker will pay less.")
@@ -458,7 +522,7 @@ def day_tickets(day_key, preds, odds, cache, now, previous=None, full=True):
             if cache is not None and (not hit or hit[1].get('locked') != ticket['locked']):
                 cache.put(key, 'tickets', ticket, now)
         else:
-            ticket = (generate_daily_top3(preds, now, day_key) if kind == 'top3'
+            ticket = (generate_daily_top3(preds, now, day_key, odds) if kind == 'top3'
                       else generate_high_odds_accumulator(preds, odds, now, day_key))
             ticket['frozen'] = False
             ticket['locked'] = bool(due and ticket.get('legs'))
