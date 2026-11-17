@@ -19,7 +19,7 @@ from . import espn, internationals
 from .cache import Cache
 from .data_fetcher import DataFetcher
 from .prediction_engine import PARAMS as PREDICTION_PARAMS, PredictionEngine
-from . import tickets
+from . import learning, tickets
 from .apifootball import Api, ApiError, hist_row, parse_odds, to_app_fixture
 from .names import Matcher, is_youth, norm
 from .net import fetch
@@ -1176,6 +1176,7 @@ def publish(history, enrich, keys, api, state, mode, extra=None):
         'status_note': status_note(api, state),
         'fetch': extra.get('fetch') or {},
         'tickets_record': extra.get('tickets_record') or {},
+        'learning': extra.get('learning') or {},
         'model': {'name': 'Dixon-Coles + bivariate Poisson with venue form',
                   'threshold': PREDICTION_THRESHOLD, 'skipped_status': 'SKIPPED_LOW_EDGE'},
         'blocked': {k: state.blocked_why.get(k, '') for k in state.blocked},
@@ -1338,6 +1339,15 @@ def main():
         log(f'Predictions failed: {e}')
         traceback.print_exc()
         predictions = {}
+    learn = {}
+    try:
+        if mode == 'full':
+            learn = learning.run(history, cache, tickets.load_archive(), log)
+        else:
+            learn = learning.load()
+        tickets.set_learning(learning.active_adjustments(learn))
+    except Exception as e:  # never stop the site update
+        log(f'Learning failed: {e}')
     record = {}
     if predictions:
         try:
@@ -1348,7 +1358,7 @@ def main():
             traceback.print_exc()
     publish(history, enrich, keys, api, state, mode,
             {'predictions': predictions, 'standings': standings, 'fetch': fetcher.status(),
-             'tickets_record': record})
+             'tickets_record': record, 'learning': learning.summary(learn)})
     cache.prune()
     cache.close()
     log(f'Done · {api.used} API request(s) used this run')

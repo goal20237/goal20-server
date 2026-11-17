@@ -185,5 +185,8 @@ data/                 stored days, team-name map, checks (saved by the bot)
 tests/test_server.py  offline end-to-end test:  python tests/test_server.py
 ```
 
+## 1.14.0
+Learning loop (`server/learning.py`). Every full run the server re-predicts about 90 days of finished matches using only the data known before each match, compares what it said with what happened, and writes `data/learning/report.json`. Where the model was proven over-confident (enough matches, at least 40 per league), the probability is trimmed: reduce-only, half strength, at most 8 points. A correction goes live only if it would have helped on the newest 40% of the matches it was not trained on; otherwise it is rolled back. Every lost Daily Top 3 leg gets a plain-language cause (derby, thin data, no price, bookmaker disagreed, bad luck...). The report summary is published in `manifest.json` (`learning`) for the app's Learning card. Quick runs reuse the stored report.
+
 ## 1.13.0
 Bookmaker check on every Daily Top 3 / longshot leg (model more than 10 points above the price: refused), 40/60 model-bookmaker blend, rating prior 12, goal cap 3.5, same-city derby handling, Grade A rules (price agrees; 1X, Over 1.5, DNB 1 only), suggested stake units on every ticket, longshot "1 chance in N".

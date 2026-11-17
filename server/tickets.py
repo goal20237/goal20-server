@@ -100,6 +100,37 @@ def probability(pred, market):
     return v
 
 
+# What the learning loop (learning.py) has taught the model so far: only ever
+# NEGATIVE corrections (more cautious), keyed 'MARKET|all', 'MARKET|cold' and
+# 'MARKET|L<league id>'. Empty until a review has found a proven weakness.
+LEARNED = {}
+
+
+def set_learning(adjustments):
+    """Install the corrections of the latest review ({key: probability points, <= 0})."""
+    LEARNED.clear()
+    for k, v in (adjustments or {}).items():
+        if isinstance(v, (int, float)) and v < 0:
+            LEARNED[str(k)] = max(-0.08, float(v))
+
+
+def learned_adjustment(pred, market):
+    """Most cautious applicable correction for this match and market (0.0 if none)."""
+    if not LEARNED:
+        return 0.0
+    keys = [f'{market}|all', f'{market}|L{pred.get("lg")}']
+    if is_cold(pred):
+        keys.append(f'{market}|cold')
+    return min([0.0] + [LEARNED[k] for k in keys if k in LEARNED])
+
+
+def adjusted_probability(pred, market):
+    p = probability(pred, market)
+    if p is None:
+        return None
+    return max(0.0, p + learned_adjustment(pred, market))
+
+
 def lose_chance(pred, market):
     """Chance the leg loses (draw no bet: only the other side winning)."""
     probs = pred.get('probs') or {}
@@ -165,7 +196,7 @@ def checked_probability(pred, market, quotes):
     (model and bookmaker within 10 points: blended 40/60), 'refused' (model
     10+ points above the bookmaker: the backtest says the bookmaker wins
     those) or 'unverified' (no price: model less a small penalty)."""
-    p = probability(pred, market)
+    p = adjusted_probability(pred, market)
     if p is None:
         return None, 'none', None
     mp = market_probability(quotes, market)
@@ -289,7 +320,8 @@ def generate_daily_top3(preds, now, day='', odds=None):
                            _leg(pred, m, p, 1 / p, confidence=round(conf, 4), in_band=True,
                                 cold=cold, grade=grade, price_check=status,
                                 market_prob=None if mp is None else round(mp, 4),
-                                model_prob=round(probability(pred, m), 4))))
+                                model_prob=round(probability(pred, m), 4),
+                                learned=round(learned_adjustment(pred, m), 4))))
     ranked.sort(key=lambda r: r[:4])
     legs = [r[4] for r in ranked[:TOP3['legs']]]
     legs.sort(key=lambda l: (GRADES.index(l['grade']), -l['confidence'], l['ts'], l['id']))
@@ -350,7 +382,7 @@ def generate_high_odds_accumulator(preds, odds, now, day='', target_odds=LONGSHO
         quotes = ((odds or {}).get(str(pred['id'])) or {}).get('v') or []
         best = est = None
         for m in LONGSHOT['markets']:
-            p = probability(pred, m)
+            p = adjusted_probability(pred, m)
             if p is None or p <= 0:
                 continue
             price, source = price_for(quotes, PRICE_KEY[m])

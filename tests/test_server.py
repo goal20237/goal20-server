@@ -1155,6 +1155,48 @@ def ticket_checks(tmp):
     assert pe2.MAX_TEAM_GOALS == 3.5 and pe2.PARAMS['prior_result'] == 12
     print('Server 1.13 rules OK')
 
+    # ---- Server 1.14: the learning loop only ever makes the model more careful.
+    import server.learning as lr
+    import random as _r
+    _r.seed(3)
+    def mkrows(n, p, hit, lg=7, m='1X', cold=False, t0=1000):
+        wins = int(round(n * hit))
+        return [{'ts': t0 + i, 'lg': lg, 'cold': cold, 'm': m, 'p': p, 'won': (i * 37) % n < wins} for i in range(n)]
+    over = mkrows(400, 0.80, 0.70)                       # model says 80%, reality 70%
+    adj = lr.fit_adjustments(over)
+    assert adj and all(v['adj'] < 0 for v in adj.values()), adj      # trims, never raises
+    assert all(v['adj'] >= -lr.MAX_CUT for v in adj.values()), adj   # capped at 8 points
+    assert '1X|all' in adj and '1X|L7' in adj
+    under = mkrows(400, 0.70, 0.80)                      # under-confident: nothing changes
+    assert not lr.fit_adjustments(under), 'learning must never raise a probability'
+    assert not lr.fit_adjustments(mkrows(100, 0.80, 0.50)), 'too few matches: no correction'
+    # the release gate: older matches over-confident, newer ones fine -> not released as a win
+    mixed = [dict(r, ts=r['ts']) for r in mkrows(300, 0.80, 0.70, t0=1000)] + mkrows(200, 0.80, 0.82, t0=5000)
+    ok, raw, new, tn = lr.gate(mixed)
+    assert ok is False and new > raw, (ok, raw, new)
+    ok2, raw2, new2, tn2 = lr.gate(mkrows(500, 0.80, 0.70))
+    assert ok2 is True and new2 < raw2
+    # applied in the ticket builder: a learned cut can drop a leg below the floor
+    tk.set_learning({'1X|all': -0.08})
+    cut = tk.generate_daily_top3([mk(401, {'1X': 0.70, '2': 0.30})], now, 'd', {})
+    assert not cut['legs'], cut['legs']                  # 0.70 - 0.08 - 0.03 (no price) < 0.65
+    tk.set_learning({'1X|all': +0.05, 'X2|all': -0.5})
+    assert tk.learned_adjustment({'lg': 1}, '1X') == 0.0 and tk.learned_adjustment({'lg': 1}, 'X2') == -0.08
+    tk.set_learning({})
+    assert tk.learned_adjustment({'lg': 1}, 'X2') == 0.0
+    # post-mortem names a reason for every lost leg
+    arch = {'2026-11-10': {'top3': {'legs': [
+        {'status': 'lost', 'home': 'A', 'away': 'B', 'label': '1X', 'volatility': ['same-city derby'], 'lose': 0.2},
+        {'status': 'lost', 'home': 'C', 'away': 'D', 'label': 'O1.5', 'volatility': [], 'lose': 0.2},
+        {'status': 'won', 'home': 'E', 'away': 'F', 'label': '1X', 'volatility': []}]}}}
+    pm = lr.post_mortems(arch)
+    assert pm['top3_lost'] == 2 and pm['top3_won'] == 1 and pm['counts'] == {'derby': 1, 'bad_luck': 1}, pm
+    # a full report on a tiny history is honest: not enough data, no corrections
+    rep = lr.build_report({'t': [], 'l': []}, [], 0, arch, None, 1794700000)
+    assert rep['status'] == 'not_enough_data' and not rep['adjustments'] and lr.active_adjustments(rep) == {}
+    assert len(rep['team']) == 4 and rep['postmortem']['top3_lost'] == 2
+    print('Server 1.14 learning OK')
+
 def espn_scenario(tmp, site, espn_world, intl_csv, server):
     import server.espn as espn_mod
     import server.internationals as intl_mod
