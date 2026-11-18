@@ -875,7 +875,8 @@
   "1766": -129168642,
   "4364": -878647965,
   "1772": -920104384,
-  "529": -851509178
+  "529": -851509178,
+  "6685": -987203199
  },
  "fc_teams": {
   "algir1|ES Setif": 905,
@@ -1479,7 +1480,17 @@
   "segunda5|Conquense": -639406013,
   "segunda5|Guadalajara": -781210483,
   "segunda5|Orihuela": -962353639,
-  "slovakia2|I. Bratislava": -654027931
+  "slovakia2|I. Bratislava": -654027931,
+  "greece2|Pyrgos": -984561340,
+  "greece2|Zakynthos": -235869833,
+  "greece2|Panionios": -613544640,
+  "greece2|Marko": -426885162,
+  "greece2|Niki Volos": -725282584,
+  "italy3b|Perugia": -558619047,
+  "italy3b|Torres": -586478953,
+  "slovakia1|Presov": -110725412,
+  "slovakia2|Presov": -110725412,
+  "slovakia2|Zvolen": -665830625
  },
  "espn_teams": {
   "4771": 1606,
@@ -1924,7 +1935,18 @@
   "133285": 9580,
   "133288": 538,
   "131385": 9632,
-  "131386": -90307423
+  "131386": -90307423,
+  "819": 24810,
+  "3458": -965688281,
+  "874": 131,
+  "6086": 120,
+  "6273": 130,
+  "9967": 118,
+  "21154": 540,
+  "3454": 133,
+  "1936": 7844,
+  "3457": 136,
+  "6079": -1018697082
  },
  "espn_own": {
   "eng.1": false,
@@ -1946,7 +1968,7 @@
   "eng.fa": false,
   "nonfifa": false,
   "bra.1": false,
-  "esp.copa_de_la_reina": true,
+  "esp.copa_de_la_reina": false,
   "usa.nwsl": false,
   "usa.usl.1": false,
   "ven.1": false,
@@ -1963,7 +1985,7 @@
   "ecu.1": false,
   "gua.1": false,
   "fra.coupe_de_france": true,
-  "bol.copa": true,
+  "bol.copa": false,
   "fra.1": false,
   "usa.1": false,
   "uru.1": false,
@@ -1988,7 +2010,8 @@
   "eng.3": false,
   "ger.2": false,
   "gre.1": false,
-  "ita.2": false
+  "ita.2": false,
+  "fifa.world.u17": true
  },
  "suspended_until": 0,
  "suspended_why": ""
