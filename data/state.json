@@ -875,7 +875,8 @@
   "529": -851509178,
   "6685": -987203199,
   "4286": -1018697082,
-  "1768": -28502928
+  "1768": -28502928,
+  "1915": -967118038
  },
  "fc_teams": {
   "algir1|ES Setif": 905,
@@ -1796,7 +1797,20 @@
   "sweden1|Orgryte": 2166,
   "sweden1|Kalmar": 374,
   "sweden1|Hammarby": 363,
-  "sweden1|Goteborg": 366
+  "sweden1|Goteborg": 366,
+  "austria1|Tirol": -948996828,
+  "austria1|A. Lustenau": 8361,
+  "greece1|AEK Athens": 575,
+  "india1|Punjab": -867225874,
+  "italy2|Verona": 504,
+  "italy2|Ascoli": 507,
+  "italy2|Cesena": 509,
+  "turkey1|Corum": 6343,
+  "turkey1|Genclerbirligi": 997,
+  "turkey1|Gaziantep": 3573,
+  "turkey1|Basaksehir": 564,
+  "turkey1|Erzurumspor": 1009,
+  "turkey1|Goztepe": 994
  },
  "espn_teams": {
   "4771": 1606,
