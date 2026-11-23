@@ -1920,7 +1920,10 @@
   "turkey2|Bandirmaspor": -891936023,
   "turkey2|Mardin 1969": -1069490089,
   "turkey2|Sariyer": -206353410,
-  "turkey2|Karagumruk": -635042517
+  "turkey2|Karagumruk": -635042517,
+  "india1|Mohun Bagan": -771658838,
+  "portugal2|Torreense": -901586066,
+  "portugal2|Leiria": -63261325
  },
  "espn_teams": {
   "4771": 1606,
@@ -2749,7 +2752,8 @@
   "510": 759,
   "436": 611,
   "494": -1042809492,
-  "411": 1383
+  "411": 1383,
+  "95": -259020480
  },
  "espn_own": {
   "eng.1": false,
@@ -2820,7 +2824,7 @@
   "ind.1": false,
   "ksa.1": false,
   "swe.1.promotion.relegation": false,
-  "eng.2": true,
+  "eng.2": false,
   "conmebol.sudamericana": false,
   "nor.1.promotion.relegation": false,
   "caf.confed": false,
