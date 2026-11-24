@@ -2827,7 +2827,8 @@
   "22167": 303,
   "17686": 4453,
   "21432": 5394,
-  "7998": 4206
+  "7998": 4206,
+  "22174": -8696348
  },
  "espn_own": {
   "eng.1": false,
@@ -2898,7 +2899,7 @@
   "ind.1": false,
   "ksa.1": false,
   "swe.1.promotion.relegation": false,
-  "eng.2": true,
+  "eng.2": false,
   "conmebol.sudamericana": false,
   "nor.1.promotion.relegation": false,
   "caf.confed": false,
