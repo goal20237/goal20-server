@@ -1998,7 +1998,17 @@
   "saudi2|Al Saqer": -171507140,
   "saudi2|Damac": -658211217,
   "slovenia1|Aluminij": -628980211,
-  "scot1|Airdrieonians": -213152573
+  "scot1|Airdrieonians": -213152573,
+  "egypt|National Bank Egypt": -161339969,
+  "saudi1|Al Okhdood": -618588292,
+  "saudi1|Al Najma": -342049301,
+  "saudi2|Al Zulfi": -852421354,
+  "saudi2|Al Najma": -342049301,
+  "saudi2|Al Taee": -417186113,
+  "saudi2|Al Okhdood": -618588292,
+  "saudi2|Al Raed": -827764082,
+  "saudi2|Hajer": -46935123,
+  "saudi2|Al Jabalain": -618452298
  },
  "espn_teams": {
   "4771": 1606,
@@ -2875,12 +2885,18 @@
   "21829": -968797242,
   "2276": 27714,
   "22028": -807438090,
-  "2500": -213152573
+  "2500": -213152573,
+  "18906": -575765782,
+  "134101": -290366814,
+  "3472": 225,
+  "18827": 12424,
+  "18615": 15996,
+  "19298": 15999
  },
  "espn_own": {
   "eng.1": false,
   "col.copa": false,
-  "bol.1": true,
+  "bol.1": false,
   "ned.1": false,
   "arg.1": false,
   "nor.1": false,
@@ -2890,7 +2906,7 @@
   "per.1": false,
   "afc.saff.championship": false,
   "ind.2": false,
-  "par.1": true,
+  "par.1": false,
   "tur.1": false,
   "esp.2": false,
   "por.1": false,
@@ -2957,7 +2973,8 @@
   "sco.challenge": true,
   "chi.copa_chi": false,
   "uefa.europa": true,
-  "uefa.europa.conf": true
+  "uefa.europa.conf": true,
+  "sco.tennents": false
  },
  "suspended_until": 0,
  "suspended_why": ""
