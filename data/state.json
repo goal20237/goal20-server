@@ -675,7 +675,6 @@
  "div_league": {
   "ARG": 128,
   "SWE": 113,
-  "E1": 40,
   "E3": 45,
   "T1": 203,
   "B1": 144,
@@ -689,7 +688,6 @@
   "D2": 79,
   "SP2": 141,
   "I2": 136,
-  "SC2": 183,
   "SC3": 184,
   "EC": 45,
   "USA": 253
@@ -2017,7 +2015,8 @@
   "saudi2|Al Bukiryah": -103097161,
   "saudi2|Al Anwar": -703437177,
   "saudi2|Al Wehda": -352594641,
-  "saudi2|Al Jandal": -865717792
+  "saudi2|Al Jandal": -865717792,
+  "sweden1|Ostersund": 2174
  },
  "espn_teams": {
   "4771": 1606,
@@ -2983,7 +2982,9 @@
   "420": 6756,
   "20123": 6731,
   "4520": 7437,
-  "8089": 632
+  "8089": 632,
+  "793": -106478239,
+  "21446": -361748795
  },
  "espn_own": {
   "eng.1": false,
@@ -3054,7 +3055,7 @@
   "ind.1": false,
   "ksa.1": true,
   "swe.1.promotion.relegation": false,
-  "eng.2": true,
+  "eng.2": false,
   "conmebol.sudamericana": false,
   "nor.1.promotion.relegation": false,
   "caf.confed": false,
